@@ -3,159 +3,177 @@ import board
 import busio
 from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
+from flask import Flask, request, render_template_string, redirect, url_for
 
 # --- Configuration ---
-SERVO_FREQUENCY = 50  # Standard frequency for most analog servos (Hz)
-NUM_SERVOS = 16       # PCA9685 has 16 channels (0-15)
+SERVO_FREQUENCY = 50
+SERVO_CHANNELS = [0, 1, 2, 3, 4, 5]
+STEP_DELAY = 0.05     # Delay after each global step
+STEP_SIZE = 1         # Degrees per sub‑step
 
-# --- !! PRECISION TUNING !! ---
-# These values are CRITICAL for accuracy. You MUST adjust them for YOUR servos.
-# Find these by experimentation:
-# - Gradually increase pulse width from ~500 until the servo stops moving at one end (min_pulse).
-# - Gradually decrease pulse width from ~2500 until the servo stops moving at the other end (max_pulse).
-# - The actuation_range should correspond to the angle range covered by min/max pulse (usually 180).
-SERVO_MIN_PULSE = 500   # Default: 500. Adjust this value for your specific servos!
-SERVO_MAX_PULSE = 2500  # Default: 2500. Adjust this value for your specific servos!
-SERVO_ACTUATION_RANGE = 180 # Angle range (usually 180 degrees) covered by min/max pulse
-
-# --- SMOOTH MOVEMENT PARAMETERS ---
-INITIAL_ANGLE = 90      # Angle to set initially
-SWEEP_START_ANGLE = 60  # Example: Start angle for a smooth sweep
-SWEEP_END_ANGLE = 120   # Example: End angle for a smooth sweep
-SWEEP_STEP = 1          # Angle increment for smooth movement (smaller = smoother, slower)
-SWEEP_DELAY = 0.015     # Delay between steps in seconds (larger = slower)
-
-# --- Initialization ---
+# --- Initialization of I2C and PCA9685 ---
 print("Initializing I2C...")
-try:
-    i2c = busio.I2C(board.SCL, board.SDA)
-except ValueError as e:
-    print(f"Error initializing I2C: {e}")
-    print("Ensure I2C is enabled in raspi-config and wiring is correct.")
-    exit()
-
+i2c = busio.I2C(board.SCL, board.SDA)
 print("Initializing PCA9685...")
-try:
-    pca = PCA9685(i2c)
-    pca.frequency = SERVO_FREQUENCY
-    print(f"PCA9685 found and frequency set to {SERVO_FREQUENCY} Hz.")
-except OSError as e:
-     print(f"Error initializing PCA9685: {e}")
-     print("Could not find PCA9685 at default address 0x40.")
-     print("Check wiring, power to PCA9685, and I2C address.")
-     exit()
-except ValueError as e:
-     print(f"Error initializing PCA9685: {e}")
-     print("Check wiring and ensure the PCA9685 is powered.")
-     exit()
+pca = PCA9685(i2c)
+pca.frequency = SERVO_FREQUENCY
 
-# --- Create Servo Objects with Calibration ---
-servos = []
-print(f"Creating {NUM_SERVOS} servo objects with specified pulse range...")
-for i in range(NUM_SERVOS):
-    try:
-        # Pass the calibrated pulse width and range to the Servo constructor
-        servo_obj = servo.Servo(
-            pca.channels[i],
-            min_pulse=SERVO_MIN_PULSE,
-            max_pulse=SERVO_MAX_PULSE,
-            actuation_range=SERVO_ACTUATION_RANGE
-        )
-        servos.append(servo_obj)
-        # print(f"  Servo object created for channel {i}") # Optional: uncomment for verbose output
-    except Exception as e:
-        print(f"Error creating servo object for channel {i}: {e}")
-        # Decide if you want to exit or just skip this servo
-        # exit() # Uncomment to stop if one servo fails
-        servos.append(None) # Add a placeholder if you want to continue
+# --- Create Servo Objects and state ---
+servos = {}
+current_angles = {}
+for ch in SERVO_CHANNELS:
+    s = servo.Servo(pca.channels[ch])
+    servos[ch] = s
+    current_angles[ch] = 90
+    s.angle = 90
 
-# Filter out any servos that failed to initialize
-active_servos = [s for s in servos if s is not None]
-if not active_servos:
-    print("No servos were initialized successfully. Exiting.")
-    exit()
-
-print(f"\nSuccessfully initialized {len(active_servos)} servos.")
-
-# --- Function for Smooth Movement ---
-def move_servos_smoothly(target_angle, current_angles, step=1, delay=0.01):
-    """Moves all active servos towards the target angle incrementally."""
-    print(f"Moving servos towards {target_angle}°...")
-    max_angle = SERVO_ACTUATION_RANGE # Use the defined range
-    min_angle = 0
-
-    # Clamp target angle to valid range
-    target_angle = max(min_angle, min(max_angle, target_angle))
-
-    # Determine the maximum change needed for any servo
-    max_delta = 0
-    for i, s in enumerate(active_servos):
-        if current_angles[i] is not None:
-             max_delta = max(max_delta, abs(target_angle - current_angles[i]))
-
-    # Calculate number of steps needed based on the largest movement
-    num_steps = int(max_delta / step)
-    if num_steps == 0:
-        num_steps = 1 # Ensure at least one step if already at target or very close
-
-    # Calculate the increment for each servo for each step
-    increments = []
-    for i, s in enumerate(active_servos):
-         if current_angles[i] is not None:
-             increments.append((target_angle - current_angles[i]) / num_steps)
-         else:
-             increments.append(0) # Should not happen if filtering worked
-
-
-    # Perform the incremental movement
-    for step_num in range(num_steps):
-        for i, s in enumerate(active_servos):
-             if current_angles[i] is not None:
-                new_angle = current_angles[i] + increments[i]
-                # Clamp intermediate angle to valid range
-                s.angle = max(min_angle, min(max_angle, new_angle))
-                current_angles[i] = new_angle # Update current angle position tracker
-
+# --- Smoothing Functions ---
+def smooth_move(servo_obj, start, end, step_size, delay):
+    step = step_size if end >= start else -step_size
+    for a in range(int(start), int(end), int(step)):
+        servo_obj.angle = a
         time.sleep(delay)
-
-    # Final adjustment to ensure all servos reach the exact target angle
-    # (compensates for potential floating point inaccuracies)
-    print(f"Fine-tuning servos to exactly {target_angle}°...")
-    for i, s in enumerate(active_servos):
-         if current_angles[i] is not None:
-            s.angle = target_angle
-            current_angles[i] = target_angle
-    print("Movement complete.")
-    return current_angles # Return the updated list of current angles
+    servo_obj.angle = end
 
 
-# --- Main Execution ---
-try:
-    # Initialize servo angles (can be instant or smooth)
-    print(f"\nSetting initial position to {INITIAL_ANGLE}°...")
-    current_angles = [None] * len(active_servos) # Track current angle for smooth movement
-    for i, s in enumerate(active_servos):
-        s.angle = INITIAL_ANGLE
-        current_angles[i] = INITIAL_ANGLE
-    time.sleep(1) # Give servos time to reach initial position
+def smooth_move_multi(channels, targets, step_size, delay):
+    # compute per-servo delta and direction
+    deltas = []
+    for ch, tgt in zip(channels, targets):
+        delta = tgt - current_angles[ch]
+        direction = step_size if delta >= 0 else -step_size
+        deltas.append((delta, direction))
 
-    # --- Example: Smooth Sweep ---
-    print("\nStarting smooth sweep example...")
-    while True: # Loop forever (or change to run once)
-        current_angles = move_servos_smoothly(SWEEP_END_ANGLE, current_angles, step=SWEEP_STEP, delay=SWEEP_DELAY)
-        time.sleep(0.5) # Pause at end angle
+    # how many sub-steps we need
+    steps = int(max(abs(d) for d, _ in deltas) / step_size)
 
-        current_angles = move_servos_smoothly(SWEEP_START_ANGLE, current_angles, step=SWEEP_STEP, delay=SWEEP_DELAY)
-        time.sleep(0.5) # Pause at start angle
+    # step through motions
+    for _ in range(steps):
+        for idx, ch in enumerate(channels):
+            delta, direction = deltas[idx]
+            if abs(current_angles[ch] - (current_angles[ch] + delta)) >= step_size:
+                current_angles[ch] += direction
+                servos[ch].angle = current_angles[ch]
+                time.sleep(delay)
 
-except KeyboardInterrupt:
-    print("\nCtrl+C detected. Stopping servos.")
-except Exception as e:
-    print(f"\nAn error occurred during execution: {e}")
-finally:
-    # --- Optional: Release PCA9685 resources ---
-    # Uncomment below if you want servos to go limp when script stops.
-    # print("\nDeinitializing PCA9685...")
-    # pca.deinit()
-    # print("PCA9685 deinitialized. PWM signals stopped.")
-    print("Script finished.")
+    # ensure exact final positions
+    for ch, tgt in zip(channels, targets):
+        servos[ch].angle = tgt
+        current_angles[ch] = tgt
+
+# --- Flask App ---
+app = Flask(__name__)
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Servo Controller</title>
+    <style>
+      body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f8; color: #333; padding: 20px; }
+      h1 { text-align: center; margin-bottom: 30px; }
+      .controls { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+      .servo-control { background: #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); padding: 15px; width: 240px; text-align: center; }
+      .servo-control label { font-weight: bold; display: block; margin-bottom: 10px; }
+      .gauge { width: 200px; height: 100px; cursor: pointer; }
+      input[type=number] { width: 60px; font-size: 1rem; text-align: center; margin-top: 10px; }
+      button { margin-top: 30px; padding: 10px 20px; font-size: 1rem; border: none; border-radius: 8px; background: #007bff; color: white; cursor: pointer; }
+      button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+  <h1>Servo Controller</h1>
+  <form method="POST" id="servoForm">
+    <div class="controls">
+    {% for ch in channels %}
+      <div class="servo-control">
+        <label>Channel {{ch}}: <span id="lbl{{ch}}">{{angles[ch]}}</span>°</label>
+        <svg class="gauge" id="gauge{{ch}}" viewBox="0 0 200 100">
+          <!-- semicircle arc -->
+          <path d="M10,100 A90,90 0 0,1 190,100" fill="none" stroke="#ddd" stroke-width="10"/>
+          <!-- pointer starts pointing left -->
+          <line id="ptr{{ch}}" x1="100" y1="100" x2="10" y2="100" stroke="#007bff" stroke-width="6" stroke-linecap="round" transform="rotate({{angles[ch]}},100,100)"/>
+        </svg>
+        <input type="number" id="num{{ch}}" name="servo{{ch}}" min="0" max="180" value="{{angles[ch]}}" />
+      </div>
+    {% endfor %}
+    </div>
+    <div style="text-align:center;"><button type="submit">Apply</button></div>
+  </form>
+  <script>
+    let draggingCh = null;
+    function updateGauge(ch, angle) {
+      const ptr = document.getElementById('ptr'+ch);
+      const lbl = document.getElementById('lbl'+ch);
+      const num = document.getElementById('num'+ch);
+      angle = Math.max(0, Math.min(180, angle));
+      ptr.setAttribute('transform', `rotate(${angle},100,100)`);
+      lbl.textContent = angle.toFixed(0);
+      num.value = angle.toFixed(0);
+    }
+    function startDrag(event) {
+      const svg = event.currentTarget;
+      draggingCh = svg.id.replace('gauge','');
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', endDrag);
+      onDrag(event);
+    }
+    function onDrag(event) {
+      if (draggingCh === null) return;
+      const svg = document.getElementById('gauge'+draggingCh);
+      const pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
+      const cx = 100, cy = 100;
+      const dx = svgP.x - cx, dy = cy - svgP.y;
+      let raw = Math.atan2(dy, dx) * 180/Math.PI;
+      let angle = 180 - raw;
+      updateGauge(draggingCh, angle);
+    }
+    function endDrag() {
+      draggingCh = null;
+      document.removeEventListener('mousemove', onDrag);
+      document.removeEventListener('mouseup', endDrag);
+    }
+    document.addEventListener('DOMContentLoaded', ()=>{
+      {% for ch in channels %}
+        const num{{ch}} = document.getElementById('num{{ch}}');
+        num{{ch}}.addEventListener('input', ()=> updateGauge({{ch}}, parseFloat(num{{ch}}.value)));
+        document.getElementById('gauge{{ch}}').addEventListener('mousedown', startDrag);
+      {% endfor %}
+    });
+  </script>
+</body>
+</html>
+'''
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        # parse target angles
+        targets = {}
+        for ch in SERVO_CHANNELS:
+            key = f'servo{ch}'
+            try:
+                targets[ch] = float(request.form.get(key, current_angles[ch]))
+            except ValueError:
+                targets[ch] = current_angles[ch]
+        # find channels that need moving
+        move_chs = [ch for ch in SERVO_CHANNELS if abs(targets[ch] - current_angles[ch]) >= 0.5]
+        if move_chs:
+            move_tgts = [targets[ch] for ch in move_chs]
+            smooth_move_multi(move_chs, move_tgts, STEP_SIZE, STEP_DELAY)
+        return redirect(url_for('index'))
+
+    # GET: render with current angles
+    return render_template_string(
+        HTML_TEMPLATE,
+        channels=SERVO_CHANNELS,
+        angles=current_angles
+    )
+
+if __name__ == '__main__':
+    print("Starting Flask server on http://0.0.0.0:5000")
+    app.run(host='0.0.0.0', port=5000)
