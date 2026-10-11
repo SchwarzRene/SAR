@@ -103,8 +103,8 @@ def empty(name, parent=None, loc=(0, 0, 0)):
 # ---------------------------------------------------------------- the robot
 def build(pose, xray=False):
     a1, a2, a3, a4, a5, a6 = (math.radians(v) for v in pose)
-    shell_alpha = 0.07 if xray else 1.0
-    white = mat("shell", (0.93, 0.94, 0.96), 0.22, 0, 0.6, shell_alpha)
+    shell_alpha = 0.10 if xray else 1.0
+    white = mat("shell", (0.80, 0.82, 0.86), 0.22, 0, 0.6, shell_alpha)
     dark = mat("seam", (0.025, 0.025, 0.03), 0.55)
     blue = mat("flange", (0.02, 0.16, 0.62), 0.25, 0, 0.5)
     silver = mat("silver", (0.72, 0.74, 0.78), 0.4, 0.9)
@@ -125,7 +125,7 @@ def build(pose, xray=False):
     box(None, (0, 0, 14 + ln / 2), (sq, sq, ln), motor_m, 1)
     cyl(None, (0, 0, 14 + ln + 15), "z", 50, 30, drive_m)
     # turret column
-    cyl(J1, (0, 0, (112 + H) / 2), "z", 58, H - 112, white, 1)
+    cyl(J1, (0, 0, (112 + H) / 2), "z", 52, H - 112, white, 1)
 
     def fork(parent, loc, rc, w_half, key, drive_dia):
         """U-joint about the y axis: motor+cycloidal housing on -y, bearing cap on +y; moving link sits between"""
@@ -145,41 +145,41 @@ def build(pose, xray=False):
         cyl(parent, (x, -(w_half + Ld / 2), z), "y", drive_dia / 2, Ld, drive_m)     # cycloidal drive
 
     # ---- J2 shoulder (fork on turret) and upper arm
-    fork(J1, (0, 0, H), 60, 38, "J2", 100)
+    fork(J1, (0, 0, H), 47, 36, "J2", 84)
     J2 = empty("J2", J1, (0, 0, H))
     J2.rotation_euler.y = -a2
-    cyl(J2, (0, 0, 0), "y", 55, 76, white, 1)                       # shoulder hub
-    cone(J2, (U / 2, 0, 0), "x", 54, 45, U, white, 0.66)            # upper arm
+    cyl(J2, (0, 0, 0), "y", 46, 70, white, 1)                       # shoulder hub
+    cone(J2, (U / 2, 0, 0), "x", 46, 39, U, white, 0.7)            # upper arm
     # ---- J3 elbow (fork on upper arm) and forearm
-    fork(J2, (U, 0, 0), 52, 31, "J3", 90)
+    fork(J2, (U, 0, 0), 45, 30, "J3", 80)
     J3 = empty("J3", J2, (U, 0, 0))
     J3.rotation_euler.y = -a3
-    cyl(J2, (U, 0, 0), "y", 47, 62, white, 1)                       # elbow hub
+    cyl(J2, (U, 0, 0), "y", 43, 58, white, 1)                       # elbow hub
     fore_a = F * 0.55
-    cone(J3, (fore_a / 2, 0, 0), "x", 44, 36, fore_a, white, 0.78)  # forearm, rear part
+    cone(J3, (fore_a / 2, 0, 0), "x", 38, 33, fore_a, white, 0.8)  # forearm, rear part
     # J4 roll: front part of the forearm rotates about the arm axis
     J4 = empty("J4", J3, (fore_a, 0, 0))
     J4.rotation_euler.x = a4
-    cyl(J4, (-0.5, 0, 0), "x", 36.5, 3, dark).scale.y = 0.78
+    cyl(J4, (-0.5, 0, 0), "x", 33.5, 3, dark).scale.y = 0.8
     fore_b = F - fore_a
-    cone(J4, (fore_b / 2 - 4, 0, 0), "x", 36, 32, fore_b + 8, white, 0.78)
+    cone(J4, (fore_b / 2 - 4, 0, 0), "x", 33, 30, fore_b + 8, white, 0.8)
     sq, ln = MOTOR["J4"]
     box(J3, (fore_a * 0.5, 0, 0), (ln, sq, sq), motor_m, 1)
     cyl(J3, (fore_a * 0.85, 0, 0), "x", 26, 25, drive_m)
     # ---- J5 wrist pitch (fork on forearm front)
-    fork(J4, (fore_b, 0, 0), 38, 25, "J5", 64)
+    fork(J4, (fore_b, 0, 0), 34, 24, "J5", 56)
     J5 = empty("J5", J4, (fore_b, 0, 0))
     J5.rotation_euler.y = -a5
-    cyl(J5, (0, 0, 0), "y", 31, 50, white, 1)
-    cone(J5, ((W - 8) / 2, 0, 0), "x", 29, 26, W - 8, white, 0.85)  # wrist link
+    cyl(J5, (0, 0, 0), "y", 30, 46, white, 1)
+    cone(J5, ((W - 8) / 2, 0, 0), "x", 28, 25, W - 8, white, 0.85)  # wrist link
     # ---- J6 tool roll
-    cyl(J5, (W - 8, 0, 0), "x", 27.5, 3, dark)
+    cyl(J5, (W - 8, 0, 0), "x", 25.5, 3, dark)
     J6 = empty("J6", J5, (W, 0, 0))
     J6.rotation_euler.x = a6
     sq, ln = MOTOR["J6"]
     box(J5, (W * 0.45, 0, 0), (ln, sq, sq), motor_m, 1)
-    cyl(J6, (10, 0, 0), "x", 27, 20, blue, 1.5)                     # blue flange like the Epson
-    cyl(J6, (-1, 0, 0), "x", 26.5, 2, silver)
+    cyl(J6, (10, 0, 0), "x", 25, 20, blue, 1.5)                     # blue flange like the Epson
+    cyl(J6, (-1, 0, 0), "x", 25.5, 2, silver)
     # ---- gripper (tool, 75 mm J6 -> TCP)
     cyl(J6, (23, 0, 0), "x", 22, 6, dark)
     box(J6, (40, 0, 0), (28, 52, 22), dark, 2)
@@ -189,7 +189,7 @@ def build(pose, xray=False):
 
 
 # ---------------------------------------------------------------- scene
-def scene_setup(cam_loc, target, res=(1280, 800), samples=64):
+def scene_setup(cam_loc, target, res=(1400, 875), samples=64):
     if os.environ.get("SAR_FAST"):
         res, samples = (720, 450), 12
     sc = bpy.context.scene
@@ -204,15 +204,15 @@ def scene_setup(cam_loc, target, res=(1280, 800), samples=64):
     sc.world = w
     w.use_nodes = True
     bg = w.node_tree.nodes["Background"]
-    bg.inputs[0].default_value = (0.82, 0.86, 0.92, 1)
-    bg.inputs[1].default_value = 0.9
+    bg.inputs[0].default_value = (0.78, 0.84, 0.93, 1)
+    bg.inputs[1].default_value = 0.6
     # floor
-    bpy.ops.mesh.primitive_plane_add(size=6)
+    bpy.ops.mesh.primitive_plane_add(size=60)
     fl = bpy.context.active_object
-    fl.data.materials.append(mat("floor", (0.78, 0.80, 0.84), 0.45, 0, 0.3))
+    fl.data.materials.append(mat("floor", (0.30, 0.36, 0.46), 0.75, 0, 0.0))
     # lights
-    for name, loc, power, size in (("key", (0.9, -1.2, 1.4), 650, 1.2), ("fill", (-1.2, -0.6, 0.8), 220, 1.5),
-                                   ("rim", (-0.6, 1.2, 1.2), 300, 1.0)):
+    for name, loc, power, size in (("key", (0.9, -1.2, 1.4), 38, 1.2), ("fill", (-1.2, -0.6, 0.8), 12, 1.5),
+                                   ("rim", (-0.6, 1.2, 1.2), 25, 1.0)):
         ld = bpy.data.lights.new(name, "AREA")
         ld.energy, ld.size = power, size
         lo = bpy.data.objects.new(name, ld)
@@ -225,7 +225,7 @@ def scene_setup(cam_loc, target, res=(1280, 800), samples=64):
         c.target, c.track_axis, c.up_axis = tgt, "TRACK_NEGATIVE_Z", "UP_Y"
     # camera
     cd = bpy.data.cameras.new("cam")
-    cd.lens = 62
+    cd.lens = 50
     co = bpy.data.objects.new("cam", cd)
     bpy.context.collection.objects.link(co)
     co.location = tuple(v * MM for v in cam_loc)
@@ -238,10 +238,10 @@ def scene_setup(cam_loc, target, res=(1280, 800), samples=64):
 
 
 SHOTS = {  # name: (pose a1..a6 deg, xray, camera, target)
-    "hero":      ((-20, 70, -85, 0, -10, 0), False, (700, -1050, 560), (110, 0, 260)),
-    "stretched": ((0, 0, 0, 0, 0, 0), False, (420, -1250, 430), (210, 0, 190)),
-    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (420, -1250, 430), (210, 0, 190)),
-    "folded":    ((0, 90, -150, 0, 60, 0), False, (700, -1050, 560), (60, 0, 230)),
+    "hero":      ((-20, 70, -85, 0, -10, 0), False, (720, 1180, 560), (120, 0, 270)),
+    "stretched": ((0, 0, 0, 0, 0, 0), False, (520, 1350, 420), (240, 0, 200)),
+    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (380, -1350, 420), (240, 0, 200)),
+    "folded":    ((0, 90, -150, 0, 60, 0), False, (720, 1180, 560), (60, 0, 250)),
 }
 
 
