@@ -18,7 +18,8 @@
   @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
   .card h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-  canvas { width: 100%; height: 640px; display: block; background: #0e1217; border-radius: 6px; }
+  #view { width: 100%; height: 640px; display: block; background: #0e1217; border-radius: 6px; }
+  .chart { width: 100%; height: 190px; display: block; background: #0e1217; border-radius: 6px; margin-top: 10px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 3px 4px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
@@ -65,6 +66,21 @@
         <button class="sec" id="reset">Reset parameters</button>
       </div>
       <div class="note">0° = link continues straight horizontally. Positive angle = rotate upward. J1, J4, J6 are roll/yaw axes: they carry no gravity torque when the load lies on the axis.</div>
+    </div>
+    <div class="card">
+      <h2>Speed simulation</h2>
+      <table id="speedparams"></table>
+      <div class="row">
+        <button id="simgo">▶ Simulate move A → B</button>
+        <button class="sec" id="simpause">⏯ Pause / play</button>
+        <button class="sec" id="simback">↩ Return to start</button>
+        <button class="sec" id="simreset">⏮ Reset to A</button>
+      </div>
+      <div class="stats" id="speedstats" style="margin-top:10px"></div>
+      <table id="speedtable"></table>
+      <canvas id="chartSpd" class="chart"></canvas>
+      <canvas id="chartUtil" class="chart"></canvas>
+      <div class="note">Torque-limited dynamics at 5 ms steps. Each joint accelerates as hard as the stepper allows at its current rpm (torque falls with speed along the curve set by corner/max rpm), against gravity at the current pose and the inertia of everything beyond it plus the reflected rotor (× n²). Inertia uses point masses and estimated rotor inertia, so treat results as a first estimate. Utilization = required motor torque ÷ torque available at that speed. A = start pose (current sliders), B = target pose; J1/J4/J6 turn by the given relative angle.</div>
     </div>
   </div>
 
@@ -132,6 +148,15 @@ const DEFAULTS = {
   eff: 0.8,      // cycloidal drive efficiency (assumption, measure your own)
   derate: 0.7,   // usable fraction of stepper holding torque (torque falls with speed, no stalling margin)
   target: 0.7,   // max utilization the motor finder / auto-select accepts
+  speed: {
+    corner: 150,   // rpm up to which a stepper delivers full torque (24 V class driver, assumption)
+    max: 1000,     // rpm where torque reaches zero
+    accel: 300,    // commanded joint acceleration deg/s²
+    vmax: 120,     // commanded joint speed limit deg/s
+    B: { a2: 60, a3: -90, a5: 45 }, // target pose for J2, J3, J5
+    d1: 90, d4: 0, d6: 0,           // relative rotation of the roll/yaw joints
+    scale: 1,                       // playback speed
+  },
   payload: 100, // g, at TCP
   baseRadius: 150, // mm, tipping radius
 };
@@ -208,9 +233,9 @@ function solve() {
 
 // ---------- UI: tables ----------
 const el = id => document.getElementById(id);
-function numInput(val, onchange, step = 1) {
+function numInput(val, onchange, step = 1, min = 0) {
   const i = document.createElement("input");
-  i.type = "number"; i.value = val; i.step = step; i.min = 0;
+  i.type = "number"; i.value = val; i.step = step; if (min !== null) i.min = min;
   i.addEventListener("input", () => { const v = parseFloat(i.value); if (!isNaN(v)) { onchange(v); render(); } });
   return i;
 }
@@ -244,6 +269,7 @@ function buildTables() {
   extra("Cycloidal efficiency", P.eff, v => P.eff = Math.min(1, v), 0.05, "0–1 (assumed)");
   extra("Usable stepper torque", P.derate, v => P.derate = Math.min(1, v), 0.05, "× holding torque");
   extra("Target utilization", P.target, v => P.target = v, 0.05, "max for finder");
+  buildSpeedParams();
 }
 
 const kgcm = nm => nm / G * 100; // N·m -> kg·cm
@@ -318,10 +344,11 @@ function renderResults(r) {
 const cv = el("view"), ctx = cv.getContext("2d");
 function render() {
   const r = solve();
-  for (const k of ["a2", "a3", "a5"]) el(k + "o").textContent = ang[k] + "°";
+  for (const k of ["a2", "a3", "a5"]) el(k + "o").textContent = Math.round(ang[k] * 10) / 10 + "°";
   el("pl").value = P.payload; el("plo").textContent = P.payload + " g";
   renderResults(r);
   draw(r);
+  renderSpeed(r);
 }
 function draw(r) {
   const dpr = window.devicePixelRatio || 1;
@@ -511,6 +538,195 @@ function draw(r) {
   ctx.fillText(stable ? "● stable (COM over base)" : "● TIPS OVER (COM outside base)", 12, 58);
 }
 
+
+// ---------- speed simulation ----------
+const RAD = Math.PI / 180;
+const JCOL = { 1: "#ff8a5b", 2: "#6db6ff", 3: "#52cf90", 4: "#c79af2", 5: "#f0bf55", 6: "#ff5ba8" };
+const JOINTS = [1, 2, 3, 4, 5, 6];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+let sim = null;
+const play = { on: false, t: 0, last: 0, i: 0 };
+
+// stepper speed-torque curve: full torque up to corner rpm, then falling to zero at max rpm
+const stepCurve = rpm => {
+  const S = P.speed;
+  return rpm <= S.corner ? 1 : rpm >= S.max ? 0 : Math.pow(1 - (rpm - S.corner) / (S.max - S.corner), 1.5);
+};
+// output torque (N·m) the drive can deliver at output speed w (rad/s)
+const availAt = (j, w) => {
+  const d = P.drives[j], m = motor(d.motor);
+  return m.nm * stepCurve(Math.abs(w) * d.ratio * 30 / Math.PI) * P.derate * d.ratio * P.eff;
+};
+// inertia (kg·m²) about the joint axis: point masses beyond the joint + reflected rotor inertia (est.)
+function inertia(j, r) {
+  const o = j === 2 ? r.J2 : j === 3 ? r.J3 : j === 5 ? r.J5 : null;
+  let I = 0;
+  for (const it of r.m) {
+    let d2;
+    if (j === 1) { if (it.from < 2) continue; d2 = (it.p.x / 1000) ** 2; }
+    else if (j === 4) { if (it.from < 5) continue; d2 = 0.015 ** 2; }              // masses assumed 15 mm off the roll axis
+    else if (j === 6) { if (!(it.kind === "payload" || it.name === "Tool")) continue; d2 = 0.015 ** 2; }
+    else { if (it.from < j) continue; d2 = ((it.p.x - o.x) ** 2 + (it.p.y - o.y) ** 2) / 1e6; }
+    I += it.mass / 1000 * d2;
+  }
+  const d = P.drives[j];
+  return Math.max(1e-6, I + motor(d.motor).nm * 1e-5 * d.ratio ** 2); // rotor inertia ≈ 1e-5 kg·m² per N·m (estimate)
+}
+const gravTs = (j, r) => (j === 2 || j === 3 || j === 5) ? r.torque["s" + j] : 0;
+
+// highest steady speed (rad/s) at which the drive still holds the gravity load
+function cruiseLimit(j, ts) {
+  const d = P.drives[j];
+  if (availAt(j, 0) < Math.abs(ts)) return 0;
+  let lo = 0, hi = P.speed.max * Math.PI / 30 / d.ratio;
+  for (let k = 0; k < 40; k++) { const mid = (lo + hi) / 2; if (availAt(j, mid) >= Math.abs(ts)) lo = mid; else hi = mid; }
+  return Math.min(lo, P.speed.vmax * RAD);
+}
+
+function simulate(targets) {
+  if (play.on && sim) { play.on = false; setFromRec(sim.rec.t.length - 1); }
+  const S = P.speed, dt = 0.005, maxT = 40, saved = { ...ang };
+  const th = { 1: jpos[1], 2: ang.a2, 3: ang.a3, 4: jpos[4], 5: ang.a5, 6: jpos[6] };
+  const start = { ...th };
+  const tgt = targets || { 1: th[1] + S.d1, 2: clamp(S.B.a2, -90, 90), 3: clamp(S.B.a3, -135, 135), 4: th[4] + S.d4, 5: clamp(S.B.a5, -120, 120), 6: th[6] + S.d6 };
+  const om = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 }; // deg/s
+  const rec = { t: [], th: {}, om: {}, util: {}, tcpv: [] };
+  for (const j of JOINTS) { rec.th[j] = []; rec.om[j] = []; rec.util[j] = []; }
+  let prev = null;
+  for (let step = 0; step * dt <= maxT; step++) {
+    ang.a2 = th[2]; ang.a3 = th[3]; ang.a5 = th[5];
+    const r = solve();
+    rec.t.push(step * dt);
+    rec.tcpv.push(prev ? Math.hypot(r.TCP.x - prev.x, r.TCP.y - prev.y) / dt : 0);
+    prev = r.TCP;
+    let allDone = true;
+    for (const j of JOINTS) {
+      const ts = gravTs(j, r), I = inertia(j, r);
+      const rem = tgt[j] - th[j], dir = rem >= 0 ? 1 : -1;
+      const A = availAt(j, om[j] * RAD);
+      const v = om[j] * dir * RAD, remR = Math.abs(rem) * RAD, acmd = S.accel * RAD;
+      let acc = 0;
+      if (Math.abs(rem) > 0.02 || Math.abs(om[j]) > 0.5) {
+        allDone = false;
+        // moving in direction dir: gravity helps or hurts depending on the sign of dir*ts
+        const aAcc = Math.min(acmd, Math.max(0, (A - dir * ts) / I));
+        const aDec = Math.min(acmd, Math.max(1e-3, (A + dir * ts) / I));
+        if (v > 0 && v * v / (2 * aDec) >= remR) acc = -aDec;
+        else if (v < S.vmax * RAD && aAcc > 0) acc = aAcc;
+      }
+      const vNew = Math.max(0, v + acc * dt);
+      const dth = (v + vNew) / 2 * dt / RAD;
+      if (dth >= Math.abs(rem) - 1e-9 && (Math.abs(rem) <= 0.02 || vNew > 0 || v > 0)) { th[j] = tgt[j]; om[j] = 0; }
+      else { th[j] += dir * dth; om[j] = dir * vNew / RAD; }
+      const Treq = ts + I * dir * acc;
+      rec.th[j].push(th[j]); rec.om[j].push(om[j]);
+      rec.util[j].push(A > 1e-9 ? Math.abs(Treq) / A : 9.99);
+    }
+    if (allDone) break;
+  }
+  Object.assign(ang, saved);
+  const n = rec.t.length, peak = {};
+  for (const j of JOINTS) {
+    peak[j] = { om: Math.max(...rec.om[j].map(Math.abs)), util: Math.max(...rec.util[j]), reached: Math.abs(tgt[j] - rec.th[j][n - 1]) < 0.05 };
+  }
+  sim = { rec, dt, start, tgt, peak, duration: rec.t[n - 1], tcpPeak: Math.max(...rec.tcpv) };
+  jpos = { 1: tgt[1], 4: tgt[4], 6: tgt[6] };
+  play.t = 0; play.i = 0; play.on = true; play.last = performance.now();
+  setFromRec(0); render(); requestAnimationFrame(tick);
+}
+let jpos = { 1: 0, 4: 0, 6: 0 };
+
+function setFromRec(i) {
+  const rc = sim.rec; play.i = i;
+  ang.a2 = rc.th[2][i]; ang.a3 = rc.th[3][i]; ang.a5 = rc.th[5][i];
+  for (const k of ["a2", "a3", "a5"]) el(k).value = ang[k];
+}
+function tick(ts) {
+  if (!play.on || !sim) return;
+  play.t += (ts - play.last) / 1000 * P.speed.scale; play.last = ts;
+  let i = Math.floor(play.t / sim.dt);
+  if (i >= sim.rec.t.length - 1) { i = sim.rec.t.length - 1; play.on = false; }
+  setFromRec(i); render();
+  if (play.on) requestAnimationFrame(tick);
+}
+
+function lineChart(cv, title, yMax, fmt, seriesOf, refLine, divs = 4) {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const c = cv.getContext("2d"); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, W, H);
+  c.font = "11px system-ui"; c.fillStyle = "#8b96a5"; c.fillText(title, 8, 13);
+  if (!sim) { c.fillText("Press “Simulate move” to see the curves", W / 2 - 110, H / 2); return; }
+  const rc = sim.rec, n = rc.t.length, T = Math.max(rc.t[n - 1], 0.1), L = 46, R = 10, Tp = 20, B = 20;
+  const X = t => L + (W - L - R) * t / T, Y = v => H - B - (H - Tp - B) * Math.min(v, yMax) / yMax;
+  c.strokeStyle = "#222b36"; c.lineWidth = 1;
+  for (let k = 0; k <= divs; k++) {
+    const v = yMax * k / divs; c.beginPath(); c.moveTo(L, Y(v)); c.lineTo(W - R, Y(v)); c.stroke();
+    c.fillStyle = "#566171"; c.textAlign = "right"; c.fillText(fmt(v), L - 4, Y(v) + 4);
+  }
+  c.textAlign = "center";
+  const dtk = T > 8 ? 2 : T > 3 ? 1 : 0.5;
+  for (let t = 0; t <= T + 1e-9; t += dtk) { c.fillStyle = "#566171"; c.fillText(t.toFixed(1) + " s", X(t), H - 6); }
+  c.textAlign = "left";
+  if (refLine) { c.strokeStyle = "#e5534b"; c.setLineDash([5, 4]); c.beginPath(); c.moveTo(L, Y(refLine)); c.lineTo(W - R, Y(refLine)); c.stroke(); c.setLineDash([]); }
+  const stride = Math.max(1, Math.floor(n / 500));
+  let lx = W - R - 30 * JOINTS.length;
+  for (const j of JOINTS) {
+    const ys = seriesOf(j);
+    c.strokeStyle = JCOL[j]; c.lineWidth = 1.6; c.beginPath();
+    for (let k = 0; k < n; k += stride) { const x = X(rc.t[k]), y = Y(ys[k]); k ? c.lineTo(x, y) : c.moveTo(x, y); }
+    c.lineTo(X(rc.t[n - 1]), Y(ys[n - 1])); c.stroke();
+    c.fillStyle = JCOL[j]; c.fillText("J" + j, lx, 13); lx += 30;
+  }
+  c.strokeStyle = "#ffffff"; c.lineWidth = 1; c.beginPath(); c.moveTo(X(rc.t[play.i]), Tp); c.lineTo(X(rc.t[play.i]), H - B); c.stroke();
+}
+
+function buildSpeedParams() {
+  const S = P.speed, t = el("speedparams"); t.innerHTML = "";
+  const rows = [
+    [["Accel °/s²", S.accel, v => S.accel = v, 50, 1], ["Max speed °/s", S.vmax, v => S.vmax = v, 10, 1], ["Playback ×", S.scale, v => S.scale = v, 0.25, 0.05]],
+    [["Corner rpm", S.corner, v => S.corner = v, 10, 1], ["Zero-torque rpm", S.max, v => S.max = Math.max(S.corner + 1, v), 50, 1], ["J1 turn °", S.d1, v => S.d1 = v, 15, null]],
+    [["B: J2 °", S.B.a2, v => S.B.a2 = v, 5, null], ["B: J3 °", S.B.a3, v => S.B.a3 = v, 5, null], ["B: J5 °", S.B.a5, v => S.B.a5 = v, 5, null]],
+    [["J4 turn °", S.d4, v => S.d4 = v, 15, null], ["J6 turn °", S.d6, v => S.d6 = v, 15, null], null],
+  ];
+  for (const row of rows) {
+    const tr = t.insertRow();
+    for (const cell of row) {
+      if (!cell) { tr.insertCell(); tr.insertCell(); continue; }
+      tr.insertCell().textContent = cell[0];
+      const c = tr.insertCell(); c.appendChild(numInput(cell[1], cell[2], cell[3], cell[4]));
+    }
+  }
+}
+
+function renderSpeed(r) {
+  const tb = el("speedtable"), i = sim ? play.i : 0;
+  let html = "<tr><th>Joint</th><th>Cruise limit</th><th>@ motor rpm</th><th>TCP speed</th><th>Angle</th><th>Speed</th><th>Motor rpm</th><th>Util.</th></tr>";
+  for (const j of JOINTS) {
+    const d = P.drives[j], ts = gravTs(j, r), wl = cruiseLimit(j, ts);
+    const rad = j === 1 ? Math.abs(r.TCP.x) : (j === 2 ? r.J2 : j === 3 ? r.J3 : j === 5 ? r.J5 : null);
+    const tcp = j === 1 ? wl * rad : rad ? wl * Math.hypot(r.TCP.x - rad.x, r.TCP.y - rad.y) : null;
+    let live = "<td>–</td><td>–</td><td>–</td><td>–</td>";
+    if (sim) {
+      const om = sim.rec.om[j][i], u = sim.rec.util[j][i];
+      live = `<td>${sim.rec.th[j][i].toFixed(1)}°</td><td>${Math.abs(om).toFixed(0)} °/s</td><td>${(Math.abs(om) * d.ratio / 6).toFixed(0)}</td><td class="${u > 1 ? "bad" : u > 0.8 ? "warn" : "ok"}">${(u * 100).toFixed(0)} %</td>`;
+    }
+    html += `<tr><td style="color:${JCOL[j]}">${servo(j).label}</td><td>${wl ? (wl / RAD).toFixed(0) + " °/s" : '<span class="bad">cannot hold</span>'}</td><td>${(wl / RAD * d.ratio / 6).toFixed(0)}</td><td>${tcp == null ? "–" : tcp.toFixed(0) + " mm/s"}</td>${live}</tr>`;
+  }
+  tb.innerHTML = html;
+
+  if (sim) {
+    const maxU = Math.max(...JOINTS.map(j => sim.peak[j].util)), ok = JOINTS.every(j => sim.peak[j].reached);
+    el("speedstats").innerHTML = `
+      <div class="stat"><b>${play.t.toFixed(2).padStart(4)} / ${sim.duration.toFixed(2)} s</b><small>time (move duration)</small></div>
+      <div class="stat"><b>${sim.tcpPeak.toFixed(0)} mm/s</b><small>peak TCP speed</small></div>
+      <div class="stat"><b class="${maxU > 1 ? "bad" : maxU > 0.8 ? "warn" : "ok"}">${(maxU * 100).toFixed(0)} %</b><small>peak motor utilization</small></div>
+      <div class="stat"><b class="${ok ? "ok" : "bad"}">${ok ? "reached" : "NOT reached"}</b><small>target pose B${ok ? "" : " (a joint stalls)"}</small></div>`;
+  } else el("speedstats").innerHTML = "";
+  const spdMax = sim ? Math.max(30, ...JOINTS.map(j => sim.peak[j].om)) * 1.1 : 1;
+  lineChart(el("chartSpd"), "Joint speed (°/s)", spdMax, v => v.toFixed(0), j => sim.rec.om[j].map(Math.abs));
+  lineChart(el("chartUtil"), "Motor utilization (required ÷ available torque at that speed)", 1.5, v => (v * 100).toFixed(0) + "%", j => sim.rec.util[j], 1, 3);
+}
+
 // ---------- events ----------
 for (const k of ["a2", "a3", "a5"]) {
   el(k).addEventListener("input", e => { ang[k] = +e.target.value; render(); });
@@ -536,13 +752,24 @@ el("auto").onclick = () => {
   buildTables(); render();
 };
 el("srcs").innerHTML = MOTORS.map(m => `<li>${m.name}: ${m.src}</li>`).join("");
-el("reset").onclick = () => { P = JSON.parse(JSON.stringify(DEFAULTS)); buildTables(); render(); };
+el("simgo").onclick = () => simulate();
+el("simback").onclick = () => { if (sim) simulate({ ...sim.start, 2: sim.start[2], 3: sim.start[3], 5: sim.start[5] }); };
+el("simpause").onclick = () => {
+  if (!sim) return;
+  if (play.on) { play.on = false; return; }
+  if (play.i >= sim.rec.t.length - 1) { play.t = 0; play.i = 0; }
+  play.on = true; play.last = performance.now(); requestAnimationFrame(tick);
+};
+el("simreset").onclick = () => { if (!sim) return; play.on = false; play.t = 0; setFromRec(0); render(); };
+el("reset").onclick = () => { sim = null; play.on = false; jpos = { 1: 0, 4: 0, 6: 0 }; P = JSON.parse(JSON.stringify(DEFAULTS)); buildTables(); render(); };
 window.addEventListener("resize", render);
 
 // optional pose from URL hash, e.g. #a2=30&a3=-60&a5=40
 for (const [k, v] of new URLSearchParams(location.hash.slice(1))) if (k in ang && !isNaN(+v)) { ang[k] = +v; el(k).value = +v; }
 buildTables();
 render();
+{ const q = new URLSearchParams(location.hash.slice(1)); // test hook: #sim=1&t=0.8 simulates and jumps to time t
+  if (q.get("sim")) { simulate(); play.on = false; play.t = +q.get("t") || 0; setFromRec(Math.min(sim.rec.t.length - 1, Math.floor(play.t / sim.dt))); render(); } }
 </script>
 </body>
 </html>
