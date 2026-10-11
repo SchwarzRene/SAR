@@ -7,8 +7,8 @@ Dimensions (mm) mirror simulation/index.html:
   wrist   J5 -> J6
   tool    J6 -> TCP
 Motors: J1, J2, J3 = NEMA 23, J4 = NEMA 14, J5 = NEMA 17, J6 = NEMA 11, each followed by a cycloidal drive.
-The steppers sit INSIDE the links on the centre line; pitch joints (J2, J3, J5) are fed through a right-angle stage and their
-drive housings alternate sides (zigzag).
+Zigzag layout like a Staubli: the upper arm is offset to +y beside the shoulder housing, the forearm returns to the
+centre line at the elbow. Each pitch joint has its stepper + cycloidal coaxial in a domed housing; J4/J6 roll motors sit in the links.
 
 Usage:  python build_robot.py [outdir]      -> renders shell + cutaway views, saves .blend and .glb
 """
@@ -56,12 +56,21 @@ def _finish(o, parent, loc, material, bevel, smooth=True):
     if bevel:
         bm = o.modifiers.new("bevel", "BEVEL")
         bm.width = bevel * MM
-        bm.segments = 4
+        bm.segments = 8 if bevel > 6 else 4
         bm.limit_method = "ANGLE"
+        bm.harden_normals = True
+        bpy.context.view_layer.objects.active = o
+        o.select_set(True)
+        bpy.ops.object.modifier_apply(modifier="bevel")   # bake so normals are computed on the final mesh
+        o.select_set(False)
     if smooth:
         bpy.context.view_layer.objects.active = o
         o.select_set(True)
-        bpy.ops.object.shade_smooth_by_angle(angle=math.radians(35))
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.normals_make_consistent(inside=False)   # outward normals (a flipped face renders black)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.shade_smooth_by_angle(angle=math.radians(50 if bevel and bevel > 6 else 35))
         o.select_set(False)
     return o
 
@@ -92,6 +101,14 @@ def box(parent, loc, size, material, bevel=1.5):
     bpy.context.view_layer.objects.active = o
     bpy.ops.object.transform_apply(scale=True)
     return _finish(o, parent, loc, material, bevel)
+
+
+def dome(parent, loc, r, depth, material):
+    """flattened sphere used as a rounded end cap; centred on the cap face, the inner half is hidden in the housing"""
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=64, ring_count=32, radius=r * MM)
+    o = bpy.context.active_object
+    o.scale = (1, depth / r, 1)
+    return _finish(o, parent, loc, material, 0)
 
 
 def empty(name, parent=None, loc=(0, 0, 0)):
@@ -128,43 +145,50 @@ def build(pose, xray=False):
     cyl(None, (0, 0, 14 + ln + 15), "z", 50, 30, drive_m)
     cyl(J1, (0, 0, (112 + H) / 2), "z", 52, H - 112, white, 1)       # turret column
 
-    def fork(parent, loc, rc, w_half, drive_dia, side, inp):
-        """Pitch joint about the y axis. Only the slim cycloidal drive housing sits on the `side` (+-y);
-        a bearing cap closes the other side. The stepper is NOT here: it lives inside the link and drives
-        the joint through a right-angle stage (bevel pair at the joint axis, input along `inp`)."""
-        Ld, Lc = 30, 42
+    def fork(parent, loc, rc, w_half, drive_dia, side, key, hmat):
+        """Wrist pitch joint (about y): coaxial stepper + cycloidal in a housing on the `side` (+-y), bearing cap opposite."""
+        sq, Lm = MOTOR[key]
+        Ld = 30
+        Lc = Ld + Lm + 8
         x, _, z = loc
-        cyl(parent, (x, side * (w_half + Lc / 2), z), "y", rc, Lc, white, 1.5)
+        cyl(parent, (x, side * (w_half + Lc / 2), z), "y", rc, Lc, hmat, 1.5)
+        dome(parent, (x, side * (w_half + Lc), z), rc, rc * 0.5, hmat)
         cyl(parent, (x, side * (w_half - 1.5), z), "y", rc * 0.97, 3, dark)
-        cyl(parent, (x, -side * (w_half + 7), z), "y", rc * 0.93, 14, white, 1.5)
+        cyl(parent, (x, -side * (w_half + 7), z), "y", rc * 0.93, 14, hmat, 1.5)
         cyl(parent, (x, -side * (w_half + 0.8), z), "y", rc * 0.94, 2.5, dark)
-        cyl(parent, (x, -side * (w_half + 15), z), "y", rc * 0.35, 3, silver)
         for i in range(6):  # cap screws
             t = i * math.pi / 3
             cyl(parent, (x + rc * 0.66 * math.cos(t), -side * (w_half + 14.6), z + rc * 0.66 * math.sin(t)), "y", 2.2, 1.5, dark)
-        cyl(parent, (x, side * (w_half + Ld / 2), z), "y", drive_dia / 2, Ld, drive_m)   # cycloidal drive
-        cyl(parent, (x, side * w_half / 2, z), "y", 6, w_half, silver)                   # shaft across the link to the drive
-        cyl(parent, (x, 0, z), "y", 14, 14, silver)                                      # bevel gear at the joint axis
-        gx, gz = (x - 17, z) if inp == "x" else (x, z - 17)
-        cyl(parent, (gx, 0, gz), inp, 12, 20, silver)                                    # mating bevel gear on the input shaft
+        cyl(parent, (x, side * (w_half + Ld / 2), z), "y", drive_dia / 2, Ld, drive_m)            # cycloidal drive
+        box(parent, (x, side * (w_half + Ld + Lm / 2 + 2), z), (sq, Lm, sq), motor_m, 1)           # stepper
 
-    # ---- J2 shoulder: drive housing on -y; vertical NEMA23 inside the turret column feeds it
-    fork(J1, (0, 0, H), 47, 40, 84, -1, "z")
-    box(J1, (0, 0, 148), (MOTOR["J2"][0], MOTOR["J2"][0], MOTOR["J2"][1]), motor_m, 1)
-    cyl(J1, (0, 0, H - 10), "z", 10, 20, silver)
+    # ---- zigzag layout (plan view): shoulder housing on the column axis, upper arm offset to +y beside it,
+    #      elbow housing at the end of the upper arm, forearm back on the centre line (+ wrist).
+    YA, AW = 101, 90                     # upper arm centre line / width (y), inner face at y = 56
+
+    # J2 shoulder: fixed housing with the NEMA23 + cycloidal on the joint axis, dome on the -y end
+    cyl(J1, (0, 11, H), "y", 58, 90, white, 1.5)                        # y -34 .. 56
+    dome(J1, (0, -34, H), 58, 30, white)
+    cyl(J1, (0, 54.5, H), "y", 57, 3, dark)
+    sq, ln = MOTOR["J2"]
+    box(J1, (0, -2, H), (sq, ln, sq), motor_m, 1)
+    cyl(J1, (0, 41, H), "y", 42, 30, drive_m)
     J2 = empty("J2", J1, (0, 0, H))
     J2.rotation_euler.y = -a2
-    cyl(J2, (0, 0, 0), "y", 46, 70, white, 1)                           # shoulder hub
-    cone(J2, (U / 2, 0, 0), "x", 48, 42, U, white, 0.82)                # upper arm
-    # ---- J3 elbow: housing on +y (zigzag); NEMA23 sits in the upper arm next to the shoulder, a shaft runs to the elbow
-    fork(J2, (U, 0, 0), 45, 32, 80, +1, "x")
+    # upper arm: hub on the drive output + rounded box link, offset to +y
+    cyl(J2, (0, YA, 0), "y", 46, AW, white, 1.5)
+    box(J2, (U / 2, YA, 0), (U, AW - 4, 80), white, 16)   # 2 mm inset: no coplanar faces with the hubs (z-fighting)
+    # J3 elbow: housing fixed to the upper arm holds NEMA23 + cycloidal on the joint axis, dome on +y
+    cyl(J2, (U, YA, 0), "y", 52, AW, white, 1.5)
+    dome(J2, (U, YA + AW / 2, 0), 52, 30, white)
+    cyl(J2, (U, 54.5, 0), "y", 51, 3, dark)
     sq, ln = MOTOR["J3"]
-    box(J2, (0.27 * U, 0, 0), (ln, sq, sq), motor_m, 1)
-    x0 = 0.27 * U + ln / 2
-    cyl(J2, ((x0 + U - 17) / 2, 0, 0), "x", 6, U - 17 - x0, silver)
+    box(J2, (U, 114, 0), (sq, ln, sq), motor_m, 1)
+    cyl(J2, (U, 71, 0), "y", 40, 30, drive_m)
     J3 = empty("J3", J2, (U, 0, 0))
     J3.rotation_euler.y = -a3
-    cyl(J2, (U, 0, 0), "y", 43, 58, white, 1)                           # elbow hub
+    # forearm hub reaches from the elbow output flange back to the centre line
+    cyl(J3, (0, 16, 0), "y", 42, 80, white, 1.5)
     fore_a = F * 0.55
     cone(J3, (fore_a / 2, 0, 0), "x", 38, 33, fore_a, white, 0.8)       # forearm, rear part
     # J4 roll: NEMA14 in the forearm, coaxial cycloidal at the split, front part rotates about the arm axis
@@ -176,11 +200,8 @@ def build(pose, xray=False):
     sq, ln = MOTOR["J4"]
     box(J3, (0.30 * F, 0, 0), (ln, sq, sq), motor_m, 1)
     cyl(J3, (fore_a - 14, 0, 0), "x", 24, 20, drive_m)
-    # ---- J5 wrist pitch: housing on -y (zigzag); NEMA17 inside the forearm front part
-    fork(J4, (fore_b, 0, 0), 34, 24, 56, -1, "x")
-    sq, ln = MOTOR["J5"]
-    box(J4, (10 + ln / 2, 0, 0), (ln, sq, sq), motor_m, 1)
-    cyl(J4, ((10 + ln + fore_b - 17) / 2, 0, 0), "x", 5, fore_b - 17 - 10 - ln, silver)
+    # ---- J5 wrist pitch: aluminium housing (zigzag back to +y), coaxial NEMA17 + cycloidal
+    fork(J4, (fore_b, 0, 0), 34, 24, 56, +1, "J5", silver)
     J5 = empty("J5", J4, (fore_b, 0, 0))
     J5.rotation_euler.y = -a5
     cyl(J5, (0, 0, 0), "y", 30, 46, white, 1)
@@ -205,7 +226,7 @@ def build(pose, xray=False):
 # ---------------------------------------------------------------- scene
 def scene_setup(cam_loc, target, res=(1400, 875), samples=64):
     if os.environ.get("SAR_FAST"):
-        res, samples = (720, 450), 12
+        res, samples = (1000, 625), 24
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
     sc.cycles.device = "CPU"
@@ -252,10 +273,11 @@ def scene_setup(cam_loc, target, res=(1400, 875), samples=64):
 
 
 SHOTS = {  # name: (pose a1..a6 deg, xray, camera, target)
-    "hero":      ((-20, 70, -85, 0, -10, 0), False, (720, 1180, 560), (120, 0, 270)),
-    "stretched": ((0, 0, 0, 0, 0, 0), False, (520, 1350, 420), (240, 0, 200)),
-    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (300, -1000, 880), (230, 0, 200)),
-    "top":       ((0, 0, 0, 0, 0, 0), True, (240, -60, 1500), (240, 0, 150)),
+    "hero":      ((-20, 70, -85, 0, -10, 0), False, (1000, 1500, 760), (120, 45, 270)),
+    "stretched": ((0, 0, 0, 0, 0, 0), False, (640, 1500, 460), (240, 35, 200)),
+    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (300, -1000, 880), (230, 40, 200)),
+    "front":     ((0, 55, -70, 0, 20, 0), False, (1500, 520, 650), (100, 40, 300)),
+    "top":       ((0, 0, 0, 0, 0, 0), True, (240, -60, 1500), (240, 40, 150)),
     "folded":    ((0, 90, -150, 0, 60, 0), False, (720, 1180, 560), (60, 0, 250)),
 }
 

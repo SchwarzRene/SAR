@@ -100,7 +100,7 @@
     <div class="card">
       <h2>Drive train: stepper + cycloidal</h2>
       <table id="servos"></table>
-      <div class="note">Ratio 1:n is a free design choice. Output torque = holding torque × usable fraction × n × efficiency. Motors sit inside the links: Pos = where along its link the motor + drive mass sits (J3 upper arm, J4/J5 forearm, J6 wrist; 0 = near the joint before it). A motor near the shoulder barely loads J2. The right-angle stage (bevel/belt) feeds the pitch joints J2, J3, J5.</div>
+      <div class="note">Ratio 1:n is a free design choice. Output torque = holding torque × usable fraction × n × efficiency. Pos = where along its link the motor + drive mass sits (J3: 1 = in the elbow housing, 0 = at the shoulder; J4/J5 along the forearm, J6 along the wrist). Default design: coaxial motors in domed joint housings, upper arm offset sideways (zigzag; the sim is a side view, so the lateral offset is not modelled). A motor moved toward the shoulder barely loads J2.</div>
     </div>
 
     <div class="card">
@@ -131,9 +131,9 @@ const DEFAULTS = {
     // joint, label, motor position 0-1 along the link that carries it (J3: upper arm, J4/J5: forearm, J6: wrist)
     { joint: 1, label: "J1 base yaw",     pos: 0 },
     { joint: 2, label: "J2 shoulder",     pos: 0 },
-    { joint: 3, label: "J3 elbow",        pos: 0.27 }, // motor in the upper arm near the shoulder, shaft runs to the elbow
+    { joint: 3, label: "J3 elbow",        pos: 1.0 }, // coaxial in the elbow housing (1 = at the elbow, 0 = at the shoulder)
     { joint: 4, label: "J4 forearm roll", pos: 0.30 }, // motor in the forearm, along J3->J5
-    { joint: 5, label: "J5 wrist",        pos: 0.75 }, // motor in the forearm front, along J3->J5
+    { joint: 5, label: "J5 wrist",        pos: 1.0 }, // coaxial in the wrist housing (1 = at J5)
     { joint: 6, label: "J6 tool roll",    pos: 0.40 }, // motor in the wrist link, along J5->J6
   ],
   // per joint: stepper motor id, cycloidal ratio 1:n (design choice), drive mass g (estimate)
@@ -145,7 +145,7 @@ const DEFAULTS = {
     5: { motor: "n17s",  ratio: 15, driveMass: 100 },
     6: { motor: "n11",   ratio: 10, driveMass: 60 },
   },
-  angle: 0.95,   // efficiency of the right-angle stage (bevel/belt) feeding the pitch joints J2, J3, J5
+  angle: 1.0,    // efficiency of an optional right-angle stage (bevel/belt) in front of J2, J3, J5; 1 = none (coaxial motors)
   eff: 0.8,      // cycloidal drive efficiency (assumption, measure your own)
   derate: 0.7,   // usable fraction of stepper holding torque (torque falls with speed, no stalling margin)
   target: 0.7,   // max utilization the motor finder / auto-select accepts
@@ -272,7 +272,7 @@ function buildTables() {
   extra("Payload at TCP", P.payload, v => P.payload = v, 10, "g");
   extra("Base radius (tipping)", P.baseRadius, v => P.baseRadius = v, 5, "mm");
   extra("Cycloidal efficiency", P.eff, v => P.eff = Math.min(1, v), 0.05, "0–1 (assumed)");
-  extra("Right-angle stage eff.", P.angle, v => P.angle = Math.min(1, v), 0.01, "J2, J3, J5 (assumed)");
+  extra("Right-angle stage eff. (1 = none)", P.angle, v => P.angle = Math.min(1, v), 0.01, "J2, J3, J5 (assumed)");
   extra("Usable stepper torque", P.derate, v => P.derate = Math.min(1, v), 0.05, "× holding torque");
   extra("Target utilization", P.target, v => P.target = v, 0.05, "max for finder");
   buildSpeedParams();
