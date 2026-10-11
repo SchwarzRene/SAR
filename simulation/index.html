@@ -80,7 +80,7 @@
       <table id="speedtable"></table>
       <canvas id="chartSpd" class="chart"></canvas>
       <canvas id="chartUtil" class="chart"></canvas>
-      <div class="note">Torque-limited dynamics at 5 ms steps. Each joint accelerates as hard as the stepper allows at its current rpm (torque falls with speed along the curve set by corner/max rpm), against gravity at the current pose and the inertia of everything beyond it plus the reflected rotor (× n²). Inertia uses point masses and estimated rotor inertia, so treat results as a first estimate. Utilization = required motor torque ÷ torque available at that speed. A = start pose (current sliders), B = target pose; J1/J4/J6 turn by the given relative angle.</div>
+      <div class="note">Torque-limited dynamics at 5 ms steps. Speed is capped by the commanded max speed, by the controller step rate (motor rpm = step rate × 60 ÷ (200 × microsteps)), and by the stepper torque curve against gravity; the table shows which one limits each joint. Each joint accelerates as hard as the stepper allows at its current rpm (torque falls with speed along the curve set by corner/max rpm), against gravity at the current pose and the inertia of everything beyond it plus the reflected rotor (× n²). Inertia uses point masses and estimated rotor inertia, so treat results as a first estimate. Utilization = required motor torque ÷ torque available at that speed. A = start pose (current sliders), B = target pose; J1/J4/J6 turn by the given relative angle.</div>
     </div>
   </div>
 
@@ -151,8 +151,10 @@ const DEFAULTS = {
   speed: {
     corner: 150,   // rpm up to which a stepper delivers full torque (24 V class driver, assumption)
     max: 1000,     // rpm where torque reaches zero
-    accel: 300,    // commanded joint acceleration deg/s²
-    vmax: 120,     // commanded joint speed limit deg/s
+    accel: 100,    // commanded joint acceleration deg/s²
+    vmax: 60,      // commanded joint speed limit deg/s
+    micro: 16,     // driver microstepping
+    fmax: 20,      // max step pulse rate in kHz the controller can generate (Pi software stepping ~ 10-30)
     B: { a2: 60, a3: -90, a5: 45 }, // target pose for J2, J3, J5
     d1: 90, d4: 0, d6: 0,           // relative rotation of the roll/yaw joints
     scale: 1,                       // playback speed
@@ -574,13 +576,20 @@ function inertia(j, r) {
 }
 const gravTs = (j, r) => (j === 2 || j === 3 || j === 5) ? r.torque["s" + j] : 0;
 
-// highest steady speed (rad/s) at which the drive still holds the gravity load
-function cruiseLimit(j, ts) {
-  const d = P.drives[j];
-  if (availAt(j, 0) < Math.abs(ts)) return 0;
-  let lo = 0, hi = P.speed.max * Math.PI / 30 / d.ratio;
-  for (let k = 0; k < 40; k++) { const mid = (lo + hi) / 2; if (availAt(j, mid) >= Math.abs(ts)) lo = mid; else hi = mid; }
-  return Math.min(lo, P.speed.vmax * RAD);
+// highest steady speed (rad/s) the joint can sustain, and what limits it:
+// the commanded max speed, the controller's step-pulse rate, or the stepper's torque curve vs the gravity load
+function cruiseInfo(j, ts) {
+  const d = P.drives[j], S = P.speed, k = Math.PI / 30 / d.ratio;
+  const wCmd = S.vmax * RAD, wDrv = Math.min(S.max, S.fmax * 1000 * 60 / (200 * S.micro)) * k;
+  let wTq = 0;
+  if (availAt(j, 0) >= Math.abs(ts)) {
+    let lo = 0, hi = S.max * k;
+    for (let n = 0; n < 24; n++) { const mid = (lo + hi) / 2; if (availAt(j, mid) >= Math.abs(ts)) lo = mid; else hi = mid; }
+    wTq = lo;
+  }
+  const w = Math.min(wCmd, wDrv, wTq);
+  const by = w === wTq ? (wTq === 0 ? "cannot hold" : "motor torque") : w === wDrv ? "step rate" : "max speed";
+  return { w, by };
 }
 
 function simulate(targets) {
@@ -605,16 +614,19 @@ function simulate(targets) {
       const rem = tgt[j] - th[j], dir = rem >= 0 ? 1 : -1;
       const A = availAt(j, om[j] * RAD);
       const v = om[j] * dir * RAD, remR = Math.abs(rem) * RAD, acmd = S.accel * RAD;
-      let acc = 0;
+      let acc = 0, vcap = Infinity;
       if (Math.abs(rem) > 0.02 || Math.abs(om[j]) > 0.5) {
         allDone = false;
         // moving in direction dir: gravity helps or hurts depending on the sign of dir*ts
         const aAcc = Math.min(acmd, Math.max(0, (A - dir * ts) / I));
         const aDec = Math.min(acmd, Math.max(1e-3, (A + dir * ts) / I));
+        vcap = cruiseInfo(j, ts).w;   // speed the motor can still sustain against gravity here
         if (v > 0 && v * v / (2 * aDec) >= remR) acc = -aDec;
-        else if (v < S.vmax * RAD && aAcc > 0) acc = aAcc;
+        else if (v > vcap * 1.001) acc = -aDec;  // overspeed for this load/pose: slow down
+        else if (v < vcap && aAcc > 0) acc = aAcc;
       }
-      const vNew = Math.max(0, v + acc * dt);
+      let vNew = Math.max(0, v + acc * dt);
+      if (acc > 0 && vNew > vcap) vNew = Math.max(v, vcap); // never accelerate past the sustainable speed
       const dth = (v + vNew) / 2 * dt / RAD;
       if (dth >= Math.abs(rem) - 1e-9 && (Math.abs(rem) <= 0.02 || vNew > 0 || v > 0)) { th[j] = tgt[j]; om[j] = 0; }
       else { th[j] += dir * dth; om[j] = dir * vNew / RAD; }
@@ -688,6 +700,7 @@ function buildSpeedParams() {
     [["Corner rpm", S.corner, v => S.corner = v, 10, 1], ["Zero-torque rpm", S.max, v => S.max = Math.max(S.corner + 1, v), 50, 1], ["J1 turn °", S.d1, v => S.d1 = v, 15, null]],
     [["B: J2 °", S.B.a2, v => S.B.a2 = v, 5, null], ["B: J3 °", S.B.a3, v => S.B.a3 = v, 5, null], ["B: J5 °", S.B.a5, v => S.B.a5 = v, 5, null]],
     [["J4 turn °", S.d4, v => S.d4 = v, 15, null], ["J6 turn °", S.d6, v => S.d6 = v, 15, null], null],
+    [["Microsteps", S.micro, v => S.micro = Math.max(1, v), 1, 1], ["Max step rate kHz", S.fmax, v => S.fmax = Math.max(1, v), 5, 1], null],
   ];
   for (const row of rows) {
     const tr = t.insertRow();
@@ -701,9 +714,9 @@ function buildSpeedParams() {
 
 function renderSpeed(r) {
   const tb = el("speedtable"), i = sim ? clamp(play.i | 0, 0, sim.rec.t.length - 1) : 0;
-  let html = "<tr><th>Joint</th><th>Cruise limit</th><th>@ motor rpm</th><th>TCP speed</th><th>Angle</th><th>Speed</th><th>Motor rpm</th><th>Util.</th></tr>";
+  let html = "<tr><th>Joint</th><th>Cruise limit</th><th>limited by</th><th>@ motor rpm</th><th>TCP speed</th><th>Angle</th><th>Speed</th><th>Motor rpm</th><th>Util.</th></tr>";
   for (const j of JOINTS) {
-    const d = P.drives[j], ts = gravTs(j, r), wl = cruiseLimit(j, ts);
+    const d = P.drives[j], ts = gravTs(j, r), ci = cruiseInfo(j, ts), wl = ci.w;
     const rad = j === 1 ? Math.abs(r.TCP.x) : (j === 2 ? r.J2 : j === 3 ? r.J3 : j === 5 ? r.J5 : null);
     const tcp = j === 1 ? wl * rad : rad ? wl * Math.hypot(r.TCP.x - rad.x, r.TCP.y - rad.y) : null;
     let live = "<td>–</td><td>–</td><td>–</td><td>–</td>";
@@ -711,7 +724,7 @@ function renderSpeed(r) {
       const om = sim.rec.om[j][i], u = sim.rec.util[j][i];
       live = `<td>${sim.rec.th[j][i].toFixed(1)}°</td><td>${Math.abs(om).toFixed(0)} °/s</td><td>${(Math.abs(om) * d.ratio / 6).toFixed(0)}</td><td class="${u > 1 ? "bad" : u > 0.8 ? "warn" : "ok"}">${(u * 100).toFixed(0)} %</td>`;
     }
-    html += `<tr><td style="color:${JCOL[j]}">${servo(j).label}</td><td>${wl ? (wl / RAD).toFixed(0) + " °/s" : '<span class="bad">cannot hold</span>'}</td><td>${(wl / RAD * d.ratio / 6).toFixed(0)}</td><td>${tcp == null ? "–" : tcp.toFixed(0) + " mm/s"}</td>${live}</tr>`;
+    html += `<tr><td style="color:${JCOL[j]}">${servo(j).label}</td><td>${wl ? (wl / RAD).toFixed(0) + " °/s" : '<span class="bad">cannot hold</span>'}</td><td style="color:var(--dim)">${ci.by}</td><td>${(wl / RAD * d.ratio / 6).toFixed(0)}</td><td>${tcp == null ? "–" : tcp.toFixed(0) + " mm/s"}</td>${live}</tr>`;
   }
   tb.innerHTML = html;
 
