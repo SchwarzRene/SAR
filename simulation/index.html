@@ -100,7 +100,7 @@
     <div class="card">
       <h2>Drive train: stepper + cycloidal</h2>
       <table id="servos"></table>
-      <div class="note">Ratio 1:n is a free design choice. Output torque = holding torque × usable fraction × n × efficiency. Motor + drive mass sits at its joint (J4 at the given fraction along the forearm), so heavier motors raise the load on the joints before them.</div>
+      <div class="note">Ratio 1:n is a free design choice. Output torque = holding torque × usable fraction × n × efficiency. Motors sit inside the links: Pos = where along its link the motor + drive mass sits (J3 upper arm, J4/J5 forearm, J6 wrist; 0 = near the joint before it). A motor near the shoulder barely loads J2. The right-angle stage (bevel/belt) feeds the pitch joints J2, J3, J5.</div>
     </div>
 
     <div class="card">
@@ -128,13 +128,13 @@ const DEFAULTS = {
     { key: "tool",  label: "Tool",      len: 75,  mass: 30,  com: 0.5 },
   ],
   servos: [
-    // joint, label, position fraction along forearm (only J4 used)
+    // joint, label, motor position 0-1 along the link that carries it (J3: upper arm, J4/J5: forearm, J6: wrist)
     { joint: 1, label: "J1 base yaw",     pos: 0 },
     { joint: 2, label: "J2 shoulder",     pos: 0 },
-    { joint: 3, label: "J3 elbow",        pos: 0 },
-    { joint: 4, label: "J4 forearm roll", pos: 0.85 },
-    { joint: 5, label: "J5 wrist",        pos: 0 },
-    { joint: 6, label: "J6 tool roll",    pos: 0 },
+    { joint: 3, label: "J3 elbow",        pos: 0.27 }, // motor in the upper arm near the shoulder, shaft runs to the elbow
+    { joint: 4, label: "J4 forearm roll", pos: 0.30 }, // motor in the forearm, along J3->J5
+    { joint: 5, label: "J5 wrist",        pos: 0.75 }, // motor in the forearm front, along J3->J5
+    { joint: 6, label: "J6 tool roll",    pos: 0.40 }, // motor in the wrist link, along J5->J6
   ],
   // per joint: stepper motor id, cycloidal ratio 1:n (design choice), drive mass g (estimate)
   drives: {
@@ -145,6 +145,7 @@ const DEFAULTS = {
     5: { motor: "n17s",  ratio: 15, driveMass: 100 },
     6: { motor: "n11",   ratio: 10, driveMass: 60 },
   },
+  angle: 0.95,   // efficiency of the right-angle stage (bevel/belt) feeding the pitch joints J2, J3, J5
   eff: 0.8,      // cycloidal drive efficiency (assumption, measure your own)
   derate: 0.7,   // usable fraction of stepper holding torque (torque falls with speed, no stalling margin)
   target: 0.7,   // max utilization the motor finder / auto-select accepts
@@ -182,7 +183,8 @@ const ang = { a2: 0, a3: 0, a5: 0 };
 const deg = d => d * Math.PI / 180;
 const part = k => P.parts.find(p => p.key === k);
 // joint drive = stepper + cycloidal reducer; mass and output torque are derived from the choices
-const availNm = (j, m = motor(P.drives[j].motor)) => m.nm * P.derate * P.drives[j].ratio * P.eff;
+const effOf = j => P.eff * ((j === 2 || j === 3 || j === 5) ? P.angle : 1);
+const availNm = (j, m = motor(P.drives[j].motor)) => m.nm * P.derate * P.drives[j].ratio * effOf(j);
 const servo = j => {
   const s = P.servos.find(x => x.joint === j), d = P.drives[j], m = motor(d.motor);
   return { joint: j, label: s.label, pos: s.pos, mass: m.mass + d.driveMass, rating: availNm(j) / G * 100 };
@@ -197,7 +199,8 @@ function solve() {
   const J6 = { x: J5.x + wr.len * Math.cos(t5), y: J5.y + wr.len * Math.sin(t5) };
   const TCP = { x: J6.x + tl.len * Math.cos(t5), y: J6.y + tl.len * Math.sin(t5) };
   const along = (a, b, f) => ({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
-  const J4 = along(J3, J5, servo(4).pos);
+  const J4 = along(J3, J5, 0.55); // roll joint splits the forearm
+  const sp = { 1: { x: 0, y: base.len * 0.5 }, 2: J2, 3: along(J2, J3, servo(3).pos), 4: along(J3, J5, servo(4).pos), 5: along(J3, J5, servo(5).pos), 6: along(J5, J6, servo(6).pos) };
 
   // masses (g) with positions; `from` = lowest joint that carries this mass
   const m = [
@@ -205,12 +208,12 @@ function solve() {
     { name: "J1 servo",      mass: servo(1).mass,  p: { x: 0, y: base.len * 0.5 },      from: 1, kind: "servo" },
     { name: "J2 servo",      mass: servo(2).mass,  p: J2,                               from: 2, kind: "servo" },
     { name: "Upper arm",     mass: up.mass,        p: along(J2, J3, up.com),            from: 2, kind: "part" },
-    { name: "J3 servo",      mass: servo(3).mass,  p: J3,                               from: 3, kind: "servo" },
+    { name: "J3 servo",      mass: servo(3).mass,  p: sp[3],                            from: 2, kind: "servo" },
     { name: "Forearm",       mass: fo.mass,        p: along(J3, J5, fo.com),            from: 3, kind: "part" },
-    { name: "J4 servo",      mass: servo(4).mass,  p: J4,                               from: 3, kind: "servo" },
-    { name: "J5 servo",      mass: servo(5).mass,  p: J5,                               from: 5, kind: "servo" },
+    { name: "J4 servo",      mass: servo(4).mass,  p: sp[4],                            from: 3, kind: "servo" },
+    { name: "J5 servo",      mass: servo(5).mass,  p: sp[5],                            from: 3, kind: "servo" },
     { name: "Wrist",         mass: wr.mass,        p: along(J5, J6, wr.com),            from: 5, kind: "part" },
-    { name: "J6 servo",      mass: servo(6).mass,  p: J6,                               from: 5, kind: "servo" },
+    { name: "J6 servo",      mass: servo(6).mass,  p: sp[6],                            from: 5, kind: "servo" },
     { name: "Tool",          mass: tl.mass,        p: along(J6, TCP, tl.com),           from: 5, kind: "part" },
     { name: "Payload",       mass: P.payload,      p: TCP,                              from: 5, kind: "payload" },
   ];
@@ -230,7 +233,7 @@ function solve() {
   const com = m.reduce((s, it) => ({ x: s.x + it.mass * it.p.x, y: s.y + it.mass * it.p.y }), { x: 0, y: 0 });
   com.x /= total; com.y /= total;
   const armMass = m.filter(it => it.from >= 2).reduce((s, it) => s + it.mass, 0);
-  return { J2, J3, J4, J5, J6, TCP, m, torque, total, com, armMass, reach: Math.hypot(TCP.x, TCP.y - J2.y) };
+  return { J2, J3, J4, J5, J6, TCP, sp, m, torque, total, com, armMass, reach: Math.hypot(TCP.x, TCP.y - J2.y) };
 }
 
 // ---------- UI: tables ----------
@@ -260,7 +263,7 @@ function buildTables() {
     tr.insertCell().appendChild(numInput(d.ratio, v => d.ratio = Math.max(1, v), 1));
     tr.insertCell().appendChild(numInput(d.driveMass, v => d.driveMass = v, 10));
     const c = tr.insertCell();
-    if (sv.joint === 4) c.appendChild(numInput(sv.pos, v => sv.pos = v, 0.05)); else c.textContent = "–";
+    if (sv.joint >= 3) c.appendChild(numInput(sv.pos, v => sv.pos = v, 0.05)); else c.textContent = "–";
   }
   const extra = (label, val, fn, step, unit) => {
     const tr = st.insertRow(); const c0 = tr.insertCell(); c0.colSpan = 2; c0.textContent = label;
@@ -269,6 +272,7 @@ function buildTables() {
   extra("Payload at TCP", P.payload, v => P.payload = v, 10, "g");
   extra("Base radius (tipping)", P.baseRadius, v => P.baseRadius = v, 5, "mm");
   extra("Cycloidal efficiency", P.eff, v => P.eff = Math.min(1, v), 0.05, "0–1 (assumed)");
+  extra("Right-angle stage eff.", P.angle, v => P.angle = Math.min(1, v), 0.01, "J2, J3, J5 (assumed)");
   extra("Usable stepper torque", P.derate, v => P.derate = Math.min(1, v), 0.05, "× holding torque");
   extra("Target utilization", P.target, v => P.target = v, 0.05, "max for finder");
   buildSpeedParams();
@@ -294,7 +298,7 @@ function renderResults(r) {
     const tr = jt.insertRow();
     tr.insertCell().textContent = servo(j).label;
     tr.insertCell().textContent = r.torque[j].toFixed(3);
-    tr.insertCell().textContent = (r.torque[j] / (d.ratio * P.eff)).toFixed(3) + " N·m";
+    tr.insertCell().textContent = (r.torque[j] / (d.ratio * effOf(j))).toFixed(3) + " N·m";
     tr.insertCell().textContent = avail.toFixed(2) + " N·m";
     const c = tr.insertCell();
     c.innerHTML = `<span class="${utilClass(u)}">${(u * 100).toFixed(0)} %</span><div class="bar"><i style="width:${Math.min(100, u * 100)}%;background:${utilColor(u)}"></i></div>`;
@@ -317,7 +321,7 @@ function renderResults(r) {
     const tr = ft.insertRow(); tr.insertCell().textContent = `${m.name.replace(/ (17HS|14HS|86BHH).*/, "")} · ${(m.nm * 100).toFixed(0)} Ncm`;
     tr.insertCell().textContent = m.mass;
     for (const j of [2, 3, 5]) {
-      const u = r.torque[j] / availNm(j, m), minR = Math.ceil(r.torque[j] / (m.nm * P.derate * P.eff * P.target));
+      const u = r.torque[j] / availNm(j, m), minR = Math.ceil(r.torque[j] / (m.nm * P.derate * effOf(j) * P.target));
       const c = tr.insertCell();
       c.innerHTML = `<span class="${utilClass(u)}">${(u * 100).toFixed(0)}%</span> <small style="color:var(--dim)">≥1:${minR}</small>`;
       if (P.drives[j].motor === m.id) c.style.outline = "1px solid var(--accent)";
@@ -454,10 +458,10 @@ function draw(r) {
   };
   sbox({ x: 0, y: baseH * 0.5 }, servo(1).mass, 0);
   sbox(r.J2, servo(2).mass, T2);
-  sbox(r.J3, servo(3).mass, T3);
-  sbox(r.J4, servo(4).mass, T3);
-  sbox(r.J5, servo(5).mass, T5);
-  sbox(r.J6, servo(6).mass, T5);
+  sbox(r.sp[3], servo(3).mass, T2);
+  sbox(r.sp[4], servo(4).mass, T3);
+  sbox(r.sp[5], servo(5).mass, T3);
+  sbox(r.sp[6], servo(6).mass, T5);
   // roll joint bands (J4 on forearm, J6 on wrist) + labels
   for (const [p, th, w, n] of [[r.J4, T3, 22, "J4"], [r.J6, T5, 16, "J6"]]) {
     ctx.save(); ctx.translate(X(p.x), Y(p.y)); ctx.rotate(th);
@@ -557,7 +561,7 @@ const stepCurve = rpm => {
 // output torque (N·m) the drive can deliver at output speed w (rad/s)
 const availAt = (j, w) => {
   const d = P.drives[j], m = motor(d.motor);
-  return m.nm * stepCurve(Math.abs(w) * d.ratio * 30 / Math.PI) * P.derate * d.ratio * P.eff;
+  return m.nm * stepCurve(Math.abs(w) * d.ratio * 30 / Math.PI) * P.derate * d.ratio * effOf(j);
 };
 // inertia (kg·m²) about the joint axis: point masses beyond the joint + reflected rotor inertia (est.)
 function inertia(j, r) {
@@ -566,7 +570,7 @@ function inertia(j, r) {
   for (const it of r.m) {
     let d2;
     if (j === 1) { if (it.from < 2) continue; d2 = (it.p.x / 1000) ** 2; }
-    else if (j === 4) { if (it.from < 5) continue; d2 = 0.015 ** 2; }              // masses assumed 15 mm off the roll axis
+    else if (j === 4) { if (it.from < 5 && it.name !== "J5 servo") continue; d2 = 0.015 ** 2; }              // masses assumed 15 mm off the roll axis
     else if (j === 6) { if (!(it.kind === "payload" || it.name === "Tool")) continue; d2 = 0.015 ** 2; }
     else { if (it.from < j) continue; d2 = ((it.p.x - o.x) ** 2 + (it.p.y - o.y) ** 2) / 1e6; }
     I += it.mass / 1000 * d2;

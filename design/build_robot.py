@@ -7,6 +7,8 @@ Dimensions (mm) mirror simulation/index.html:
   wrist   J5 -> J6
   tool    J6 -> TCP
 Motors: J1, J2, J3 = NEMA 23, J4 = NEMA 14, J5 = NEMA 17, J6 = NEMA 11, each followed by a cycloidal drive.
+The steppers sit INSIDE the links on the centre line; pitch joints (J2, J3, J5) are fed through a right-angle stage and their
+drive housings alternate sides (zigzag).
 
 Usage:  python build_robot.py [outdir]      -> renders shell + cutaway views, saves .blend and .glb
 """
@@ -120,71 +122,83 @@ def build(pose, xray=False):
 
     J1 = empty("J1", None)
     J1.rotation_euler.z = a1
-    # J1 inner parts (cutaway): vertical NEMA23 + cycloidal under the turret
+    # J1: vertical NEMA23 + cycloidal under the turret (coaxial, no right-angle stage)
     sq, ln = MOTOR["J1"]
     box(None, (0, 0, 14 + ln / 2), (sq, sq, ln), motor_m, 1)
     cyl(None, (0, 0, 14 + ln + 15), "z", 50, 30, drive_m)
-    # turret column
-    cyl(J1, (0, 0, (112 + H) / 2), "z", 52, H - 112, white, 1)
+    cyl(J1, (0, 0, (112 + H) / 2), "z", 52, H - 112, white, 1)       # turret column
 
-    def fork(parent, loc, rc, w_half, key, drive_dia):
-        """U-joint about the y axis: motor+cycloidal housing on -y, bearing cap on +y; moving link sits between"""
-        sq, ln = MOTOR[key]
-        Ld = 30
-        Lc = Ld + ln + 10
+    def fork(parent, loc, rc, w_half, drive_dia, side, inp):
+        """Pitch joint about the y axis. Only the slim cycloidal drive housing sits on the `side` (+-y);
+        a bearing cap closes the other side. The stepper is NOT here: it lives inside the link and drives
+        the joint through a right-angle stage (bevel pair at the joint axis, input along `inp`)."""
+        Ld, Lc = 30, 42
         x, _, z = loc
-        cyl(parent, (x, -(w_half + Lc / 2), z), "y", rc, Lc, white, 1.5)
-        cyl(parent, (x, -w_half + 1.5, z), "y", rc * 0.97, 3, dark)
-        cyl(parent, (x, w_half + 7, z), "y", rc * 0.93, 14, white, 1.5)
-        cyl(parent, (x, w_half + 0.8, z), "y", rc * 0.94, 2.5, dark)
-        cyl(parent, (x, w_half + 15, z), "y", rc * 0.35, 3, silver)
+        cyl(parent, (x, side * (w_half + Lc / 2), z), "y", rc, Lc, white, 1.5)
+        cyl(parent, (x, side * (w_half - 1.5), z), "y", rc * 0.97, 3, dark)
+        cyl(parent, (x, -side * (w_half + 7), z), "y", rc * 0.93, 14, white, 1.5)
+        cyl(parent, (x, -side * (w_half + 0.8), z), "y", rc * 0.94, 2.5, dark)
+        cyl(parent, (x, -side * (w_half + 15), z), "y", rc * 0.35, 3, silver)
         for i in range(6):  # cap screws
             t = i * math.pi / 3
-            cyl(parent, (x + rc * 0.66 * math.cos(t), w_half + 14.6, z + rc * 0.66 * math.sin(t)), "y", 2.2, 1.5, dark)
-        box(parent, (x, -(w_half + Ld + ln / 2), z), (sq, ln, sq), motor_m, 1)       # stepper
-        cyl(parent, (x, -(w_half + Ld / 2), z), "y", drive_dia / 2, Ld, drive_m)     # cycloidal drive
+            cyl(parent, (x + rc * 0.66 * math.cos(t), -side * (w_half + 14.6), z + rc * 0.66 * math.sin(t)), "y", 2.2, 1.5, dark)
+        cyl(parent, (x, side * (w_half + Ld / 2), z), "y", drive_dia / 2, Ld, drive_m)   # cycloidal drive
+        cyl(parent, (x, side * w_half / 2, z), "y", 6, w_half, silver)                   # shaft across the link to the drive
+        cyl(parent, (x, 0, z), "y", 14, 14, silver)                                      # bevel gear at the joint axis
+        gx, gz = (x - 17, z) if inp == "x" else (x, z - 17)
+        cyl(parent, (gx, 0, gz), inp, 12, 20, silver)                                    # mating bevel gear on the input shaft
 
-    # ---- J2 shoulder (fork on turret) and upper arm
-    fork(J1, (0, 0, H), 47, 36, "J2", 84)
+    # ---- J2 shoulder: drive housing on -y; vertical NEMA23 inside the turret column feeds it
+    fork(J1, (0, 0, H), 47, 40, 84, -1, "z")
+    box(J1, (0, 0, 148), (MOTOR["J2"][0], MOTOR["J2"][0], MOTOR["J2"][1]), motor_m, 1)
+    cyl(J1, (0, 0, H - 10), "z", 10, 20, silver)
     J2 = empty("J2", J1, (0, 0, H))
     J2.rotation_euler.y = -a2
-    cyl(J2, (0, 0, 0), "y", 46, 70, white, 1)                       # shoulder hub
-    cone(J2, (U / 2, 0, 0), "x", 46, 39, U, white, 0.7)            # upper arm
-    # ---- J3 elbow (fork on upper arm) and forearm
-    fork(J2, (U, 0, 0), 45, 30, "J3", 80)
+    cyl(J2, (0, 0, 0), "y", 46, 70, white, 1)                           # shoulder hub
+    cone(J2, (U / 2, 0, 0), "x", 48, 42, U, white, 0.82)                # upper arm
+    # ---- J3 elbow: housing on +y (zigzag); NEMA23 sits in the upper arm next to the shoulder, a shaft runs to the elbow
+    fork(J2, (U, 0, 0), 45, 32, 80, +1, "x")
+    sq, ln = MOTOR["J3"]
+    box(J2, (0.27 * U, 0, 0), (ln, sq, sq), motor_m, 1)
+    x0 = 0.27 * U + ln / 2
+    cyl(J2, ((x0 + U - 17) / 2, 0, 0), "x", 6, U - 17 - x0, silver)
     J3 = empty("J3", J2, (U, 0, 0))
     J3.rotation_euler.y = -a3
-    cyl(J2, (U, 0, 0), "y", 43, 58, white, 1)                       # elbow hub
+    cyl(J2, (U, 0, 0), "y", 43, 58, white, 1)                           # elbow hub
     fore_a = F * 0.55
-    cone(J3, (fore_a / 2, 0, 0), "x", 38, 33, fore_a, white, 0.8)  # forearm, rear part
-    # J4 roll: front part of the forearm rotates about the arm axis
+    cone(J3, (fore_a / 2, 0, 0), "x", 38, 33, fore_a, white, 0.8)       # forearm, rear part
+    # J4 roll: NEMA14 in the forearm, coaxial cycloidal at the split, front part rotates about the arm axis
     J4 = empty("J4", J3, (fore_a, 0, 0))
     J4.rotation_euler.x = a4
     cyl(J4, (-0.5, 0, 0), "x", 33.5, 3, dark).scale.y = 0.8
     fore_b = F - fore_a
     cone(J4, (fore_b / 2 - 4, 0, 0), "x", 33, 30, fore_b + 8, white, 0.8)
     sq, ln = MOTOR["J4"]
-    box(J3, (fore_a * 0.5, 0, 0), (ln, sq, sq), motor_m, 1)
-    cyl(J3, (fore_a * 0.85, 0, 0), "x", 26, 25, drive_m)
-    # ---- J5 wrist pitch (fork on forearm front)
-    fork(J4, (fore_b, 0, 0), 34, 24, "J5", 56)
+    box(J3, (0.30 * F, 0, 0), (ln, sq, sq), motor_m, 1)
+    cyl(J3, (fore_a - 14, 0, 0), "x", 24, 20, drive_m)
+    # ---- J5 wrist pitch: housing on -y (zigzag); NEMA17 inside the forearm front part
+    fork(J4, (fore_b, 0, 0), 34, 24, 56, -1, "x")
+    sq, ln = MOTOR["J5"]
+    box(J4, (10 + ln / 2, 0, 0), (ln, sq, sq), motor_m, 1)
+    cyl(J4, ((10 + ln + fore_b - 17) / 2, 0, 0), "x", 5, fore_b - 17 - 10 - ln, silver)
     J5 = empty("J5", J4, (fore_b, 0, 0))
     J5.rotation_euler.y = -a5
     cyl(J5, (0, 0, 0), "y", 30, 46, white, 1)
-    cone(J5, ((W - 8) / 2, 0, 0), "x", 28, 25, W - 8, white, 0.85)  # wrist link
-    # ---- J6 tool roll
+    cone(J5, ((W - 8) / 2, 0, 0), "x", 28, 25, W - 8, white, 0.85)      # wrist link
+    # ---- J6 tool roll: NEMA11 in the wrist link, coaxial cycloidal at the flange
     cyl(J5, (W - 8, 0, 0), "x", 25.5, 3, dark)
     J6 = empty("J6", J5, (W, 0, 0))
     J6.rotation_euler.x = a6
     sq, ln = MOTOR["J6"]
-    box(J5, (W * 0.45, 0, 0), (ln, sq, sq), motor_m, 1)
-    cyl(J6, (10, 0, 0), "x", 25, 20, blue, 1.5)                     # blue flange like the Epson
+    box(J5, (0.4 * W, 0, 0), (ln, sq, sq), motor_m, 1)
+    cyl(J5, (W - 15, 0, 0), "x", 20, 14, drive_m)
+    cyl(J6, (10, 0, 0), "x", 25, 20, blue, 1.5)                         # blue flange like the Epson
     cyl(J6, (-1, 0, 0), "x", 25.5, 2, silver)
     # ---- gripper (tool, 75 mm J6 -> TCP)
     cyl(J6, (23, 0, 0), "x", 22, 6, dark)
     box(J6, (40, 0, 0), (28, 52, 22), dark, 2)
-    for s in (-1, 1):
-        box(J6, (T - 12, s * 20, 0), (24, 7, 16), silver, 1)
+    for s_ in (-1, 1):
+        box(J6, (T - 12, s_ * 20, 0), (24, 7, 16), silver, 1)
     return dict(J1=J1, J2=J2, J3=J3, J5=J5, J6=J6)
 
 
@@ -240,7 +254,8 @@ def scene_setup(cam_loc, target, res=(1400, 875), samples=64):
 SHOTS = {  # name: (pose a1..a6 deg, xray, camera, target)
     "hero":      ((-20, 70, -85, 0, -10, 0), False, (720, 1180, 560), (120, 0, 270)),
     "stretched": ((0, 0, 0, 0, 0, 0), False, (520, 1350, 420), (240, 0, 200)),
-    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (380, -1350, 420), (240, 0, 200)),
+    "cutaway":   ((0, 0, 0, 0, 0, 0), True, (300, -1000, 880), (230, 0, 200)),
+    "top":       ((0, 0, 0, 0, 0, 0), True, (240, -60, 1500), (240, 0, 150)),
     "folded":    ((0, 90, -150, 0, 60, 0), False, (720, 1180, 560), (60, 0, 250)),
 }
 
