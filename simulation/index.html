@@ -57,6 +57,7 @@
         <label>J2 shoulder</label><input type="range" id="a2" min="-90" max="90" value="0"><output id="a2o"></output>
         <label>J3 elbow</label><input type="range" id="a3" min="-135" max="135" value="0"><output id="a3o"></output>
         <label>J5 wrist</label><input type="range" id="a5" min="-120" max="120" value="0"><output id="a5o"></output>
+        <label>Payload</label><input type="range" id="pl" min="0" max="2000" step="10" value="100"><output id="plo"></output>
       </div>
       <div class="row">
         <button id="stretch">Max stretch (all 0°)</button>
@@ -72,7 +73,7 @@
       <h2>Results</h2>
       <div class="stats" id="stats"></div>
       <table id="joints"></table>
-      <div class="note">Utilization = gravity load ÷ available output torque (motor × usable fraction × ratio × efficiency). Keep it below ~50 % for continuous holding with margin for acceleration.</div>
+      <div class="note">Max payload = largest TCP mass that keeps that joint at the target utilization in this pose (the lowest value limits the robot). Utilization = gravity load ÷ available output torque (motor × usable fraction × ratio × efficiency). Keep it below ~50 % for continuous holding with margin for acceleration.</div>
     </div>
 
     <div class="card">
@@ -259,7 +260,7 @@ function renderResults(r) {
     <div class="stat"><b class="${tipMargin > 0 ? "ok" : "bad"}">${r.com.x.toFixed(0)} mm</b><small>COM offset (base radius ${P.baseRadius}) ${tipMargin > 0 ? "stable" : "TIPS OVER"}</small></div>`;
 
   const jt = el("joints");
-  jt.innerHTML = "<tr><th>Joint</th><th>Load N·m</th><th>Motor needs</th><th>Output avail.</th><th>Utilization</th></tr>";
+  jt.innerHTML = "<tr><th>Joint</th><th>Load N·m</th><th>Motor needs</th><th>Output avail.</th><th>Utilization</th><th>Max payload</th></tr>";
   for (const j of [2, 3, 5]) {
     const avail = availNm(j), u = r.torque[j] / avail, d = P.drives[j];
     const tr = jt.insertRow();
@@ -269,10 +270,15 @@ function renderResults(r) {
     tr.insertCell().textContent = avail.toFixed(2) + " N·m";
     const c = tr.insertCell();
     c.innerHTML = `<span class="${utilClass(u)}">${(u * 100).toFixed(0)} %</span><div class="bar"><i style="width:${Math.min(100, u * 100)}%;background:${utilColor(u)}"></i></div>`;
+    // payload torque is linear in payload mass: solve for the mass that reaches the target utilization
+    const dx = (r.TCP.x - r["J" + j].x) / 1000, t0 = r.torque["s" + j] - (P.payload / 1000) * G * dx;
+    const mc = tr.insertCell();
+    if (dx <= 0) mc.textContent = "∞";
+    else { const mp = Math.max(0, (avail * P.target - Math.abs(t0)) / (G * dx) * 1000); mc.textContent = mp.toFixed(0) + " g"; mc.className = mp < P.payload ? "bad" : ""; }
   }
   for (const j of [1, 4, 6]) {
     const tr = jt.insertRow(); tr.insertCell().textContent = servo(j).label;
-    const c = tr.insertCell(); c.colSpan = 4; c.style.textAlign = "left"; c.style.color = "var(--dim)";
+    const c = tr.insertCell(); c.colSpan = 5; c.style.textAlign = "left"; c.style.color = "var(--dim)";
     c.textContent = `roll axis · no gravity torque · avail. ${availNm(j).toFixed(2)} N·m`;
   }
 
@@ -313,6 +319,7 @@ const cv = el("view"), ctx = cv.getContext("2d");
 function render() {
   const r = solve();
   for (const k of ["a2", "a3", "a5"]) el(k + "o").textContent = ang[k] + "°";
+  el("pl").value = P.payload; el("plo").textContent = P.payload + " g";
   renderResults(r);
   draw(r);
 }
@@ -508,6 +515,7 @@ function draw(r) {
 for (const k of ["a2", "a3", "a5"]) {
   el(k).addEventListener("input", e => { ang[k] = +e.target.value; render(); });
 }
+el("pl").addEventListener("input", e => { P.payload = +e.target.value; buildTables(); render(); });
 function setAngles(a2, a3, a5) {
   Object.assign(ang, { a2, a3, a5 });
   el("a2").value = a2; el("a3").value = a3; el("a5").value = a5; render();
