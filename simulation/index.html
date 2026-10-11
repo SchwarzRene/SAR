@@ -637,14 +637,15 @@ function simulate(targets) {
 let jpos = { 1: 0, 4: 0, 6: 0 };
 
 function setFromRec(i) {
-  const rc = sim.rec; play.i = i;
+  const rc = sim.rec; i = clamp(i | 0, 0, rc.t.length - 1); play.i = i;
   ang.a2 = rc.th[2][i]; ang.a3 = rc.th[3][i]; ang.a5 = rc.th[5][i];
   for (const k of ["a2", "a3", "a5"]) el(k).value = ang[k];
 }
 function tick(ts) {
   if (!play.on || !sim) return;
-  play.t += (ts - play.last) / 1000 * P.speed.scale; play.last = ts;
-  let i = Math.floor(play.t / sim.dt);
+  // rAF timestamps can precede the performance.now() taken at click time -> never step backwards
+  play.t = Math.max(0, play.t + Math.max(0, ts - play.last) / 1000 * P.speed.scale); play.last = ts;
+  let i = Math.max(0, Math.floor(play.t / sim.dt) || 0);
   if (i >= sim.rec.t.length - 1) { i = sim.rec.t.length - 1; play.on = false; }
   setFromRec(i); render();
   if (play.on) requestAnimationFrame(tick);
@@ -699,7 +700,7 @@ function buildSpeedParams() {
 }
 
 function renderSpeed(r) {
-  const tb = el("speedtable"), i = sim ? play.i : 0;
+  const tb = el("speedtable"), i = sim ? clamp(play.i | 0, 0, sim.rec.t.length - 1) : 0;
   let html = "<tr><th>Joint</th><th>Cruise limit</th><th>@ motor rpm</th><th>TCP speed</th><th>Angle</th><th>Speed</th><th>Motor rpm</th><th>Util.</th></tr>";
   for (const j of JOINTS) {
     const d = P.drives[j], ts = gravTs(j, r), wl = cruiseLimit(j, ts);
