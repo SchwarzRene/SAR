@@ -18,7 +18,7 @@
   @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
   .card h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-  canvas { width: 100%; height: 520px; display: block; background: #0e1217; border-radius: 6px; }
+  canvas { width: 100%; height: 640px; display: block; background: #0e1217; border-radius: 6px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 3px 4px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
@@ -111,7 +111,7 @@ const DEFAULTS = {
     { joint: 6, label: "J6 tool roll",   mass: 13, rating: 3,  pos: 0 },
   ],
   payload: 100, // g, at TCP
-  baseRadius: 60, // mm, tipping radius
+  baseRadius: 150, // mm, tipping radius
 };
 let P = JSON.parse(JSON.stringify(DEFAULTS));
 const ang = { a2: 0, a3: 0, a5: 0 };
@@ -262,70 +262,185 @@ function draw(r) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
-  // fit scale to the maximum possible reach so the view stays stable while moving sliders
+  // fixed scale (fits the fully extended arm in any pose, so the view doesn't jump)
   const maxReach = part("upper").len + part("fore").len + part("wrist").len + part("tool").len;
-  const base = part("base").len;
-  const s = Math.min((W - 120) / (maxReach + P.baseRadius + 20), (H - 80) / (base + maxReach + 20));
-  const ox = 70 + P.baseRadius * s, oy = H - 40; // world (0,0) = base centre on ground
+  const baseH = part("base").len;
+  const s = Math.min((W - 110) / (maxReach + P.baseRadius + 40), (H - 90) / (baseH + maxReach + 30));
+  const ox = 60 + P.baseRadius * s, oy = H - 44;
   const X = x => ox + x * s, Y = y => oy - y * s;
+  const scr = (a, b) => Math.atan2(Y(b.y) - Y(a.y), X(b.x) - X(a.x)); // screen angle a->b
+  const lerp = (a, b, f) => ({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+  const util = j => kgcm(r.torque[j]) / servo(j).rating;
+  const ucol = u => u < 0.5 ? "#3fb97a" : u < 0.8 ? "#e5a93a" : "#e5534b";
+  const T2 = -deg(ang.a2), T3 = -deg(ang.a2 + ang.a3), T5 = -deg(ang.a2 + ang.a3 + ang.a5);
 
-  // grid + ground
-  ctx.strokeStyle = "#1c232d"; ctx.lineWidth = 1; ctx.font = "10px sans-serif"; ctx.fillStyle = "#566171";
-  for (let mm = 0; mm <= maxReach + 50; mm += 50) {
+  // --- background: grid, ground ---
+  ctx.lineWidth = 1; ctx.font = "10px system-ui"; ctx.textAlign = "center";
+  for (let mm = -100; mm <= maxReach + 40; mm += 50) {
+    ctx.strokeStyle = mm % 100 === 0 ? "#222b36" : "#171d26";
     ctx.beginPath(); ctx.moveTo(X(mm), 0); ctx.lineTo(X(mm), oy); ctx.stroke();
-    ctx.fillText(mm, X(mm) + 2, oy + 12);
+    if (mm >= 0 && mm % 100 === 0) { ctx.fillStyle = "#566171"; ctx.fillText(mm + " mm", X(mm), oy + 30); }
   }
-  ctx.strokeStyle = "#3a4452"; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(W, oy); ctx.stroke();
+  for (let mm = 0; mm <= baseH + maxReach; mm += 50) {
+    ctx.strokeStyle = "#171d26"; ctx.beginPath(); ctx.moveTo(0, Y(mm)); ctx.lineTo(W, Y(mm)); ctx.stroke();
+  }
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#151b23"; ctx.fillRect(0, oy, W, H - oy);
+  ctx.strokeStyle = "#2a3340"; ctx.lineWidth = 1;
+  for (let x = -H; x < W; x += 12) { ctx.beginPath(); ctx.moveTo(x + 12, oy); ctx.lineTo(x, oy + 12); ctx.stroke(); }
+  ctx.strokeStyle = "#5a6677"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(W, oy); ctx.stroke();
 
-  // base footprint
-  ctx.fillStyle = "#2a3340"; ctx.fillRect(X(-P.baseRadius), oy - 6, 2 * P.baseRadius * s, 6);
-
-  const link = (a, b, w, col) => {
-    ctx.strokeStyle = col; ctx.lineWidth = w * s; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(X(a.x), Y(a.y)); ctx.lineTo(X(b.x), Y(b.y)); ctx.stroke();
+  // --- helpers ---
+  const grad = (c1, c2, w) => { const g = ctx.createLinearGradient(0, -w / 2, 0, w / 2); g.addColorStop(0, c1); g.addColorStop(1, c2); return g; };
+  const body = (a, b, wmm, c1, c2) => {
+    const w = wmm * s, L = Math.hypot(X(b.x) - X(a.x), Y(b.y) - Y(a.y));
+    ctx.save(); ctx.translate(X(a.x), Y(a.y)); ctx.rotate(scr(a, b));
+    ctx.beginPath(); ctx.roundRect(-w / 2, -w / 2, L + w, w, w / 2);
+    ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+    ctx.fillStyle = grad(c1, c2, w); ctx.fill(); ctx.shadowColor = "transparent";
+    ctx.strokeStyle = "rgba(255,255,255,.28)"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = Math.max(1, w * 0.1);
+    ctx.beginPath(); ctx.moveTo(w * .6, -w * .22); ctx.lineTo(L - w * .6, -w * .22); ctx.stroke();
+    ctx.restore();
   };
-  link({ x: 0, y: 0 }, r.J2, 34, "#5b6778");
-  link(r.J2, r.J3, 24, "#4aa3ff");
-  link(r.J3, r.J5, 20, "#3fb97a");
-  link(r.J5, r.J6, 14, "#e5a93a");
-  link(r.J6, r.TCP, 8, "#b57bee");
+  const pill = (txt, x, y, col) => {
+    ctx.font = "600 12px system-ui"; const w = ctx.measureText(txt).width + 16;
+    x = Math.max(w / 2 + 4, Math.min(W - w / 2 - 4, x));
+    ctx.fillStyle = "rgba(14,18,23,.95)"; ctx.beginPath(); ctx.roundRect(x - w / 2, y - 12, w, 24, 7); ctx.fill();
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = "#e6eaf0"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(txt, x, y + 1);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  };
+  const arrow = (x1, y1, x2, y2, col, lw = 2) => {
+    const a = Math.atan2(y2 - y1, x2 - x1);
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - 9 * Math.cos(a - .4), y2 - 9 * Math.sin(a - .4));
+    ctx.lineTo(x2 - 9 * Math.cos(a + .4), y2 - 9 * Math.sin(a + .4)); ctx.fill();
+  };
 
-  // mass markers with gravity arrows (area ~ mass)
-  const colors = { part: "#ffffff", servo: "#ff8a5b", payload: "#ff5ba8" };
-  for (const it of r.m) {
-    const rad = Math.max(3, Math.sqrt(it.mass) * 0.45);
-    ctx.fillStyle = colors[it.kind]; ctx.globalAlpha = 0.85;
-    ctx.beginPath(); ctx.arc(X(it.p.x), Y(it.p.y), rad, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+  // --- base: footprint plate (green = stable, red = tips), pedestal, turntable ---
+  const stable = Math.abs(r.com.x) <= P.baseRadius;
+  ctx.fillStyle = stable ? "#2c5a45" : "#6b2d2a";
+  ctx.fillRect(X(-P.baseRadius), oy - 7, 2 * P.baseRadius * s, 7);
+  ctx.strokeStyle = stable ? "#3fb97a" : "#e5534b"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(X(-P.baseRadius), oy - 7, 2 * P.baseRadius * s, 7);
+  ctx.save(); ctx.translate(X(0), Y(baseH / 2) - 3);
+  ctx.beginPath(); ctx.roundRect(-26 * s, -(baseH / 2 - 6) * s, 52 * s, (baseH - 8) * s, 6);
+  ctx.fillStyle = grad("#8a95a6", "#4a5463", (baseH - 8) * s); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.28)"; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+  ctx.fillStyle = "#aab4c2"; ctx.fillRect(X(-32), Y(baseH) - 2, 64 * s, 8 * s); // turntable
+  ctx.fillStyle = "#e6eaf0"; ctx.font = "600 11px system-ui"; ctx.textAlign = "center";
+  ctx.fillText("J1 ⟲", X(0), Y(baseH / 2) + 2); ctx.textAlign = "left";
+
+  // --- links ---
+  body(r.J2, r.J3, 26, "#6db6ff", "#2f78c4");
+  body(r.J3, r.J5, 22, "#52cf90", "#2a8b5c");
+  body(r.J5, r.J6, 16, "#f0bf55", "#b07f1e");
+  const palm = lerp(r.J6, r.TCP, 0.5);
+  body(r.J6, palm, 13, "#c79af2", "#7f4cb5");
+  // gripper fingers
+  ctx.save(); ctx.translate(X(palm.x), Y(palm.y)); ctx.rotate(T5);
+  const fl = Math.hypot(r.TCP.x - palm.x, r.TCP.y - palm.y) * s;
+  ctx.fillStyle = "#9c6ed0"; ctx.strokeStyle = "rgba(255,255,255,.3)"; ctx.lineWidth = 1;
+  for (const sg of [-1, 1]) { ctx.beginPath(); ctx.roundRect(0, sg * 7 * s - 1.5 * s, fl, 3 * s, 2); ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+
+  // --- servo boxes ---
+  const sbox = (p, mass, theta, label) => {
+    const h = Math.cbrt(mass) * 3.0 * s, w = h * 1.7;
+    ctx.save(); ctx.translate(X(p.x), Y(p.y)); ctx.rotate(theta);
+    ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, 3);
+    ctx.fillStyle = "#222a35"; ctx.fill(); ctx.strokeStyle = "#ff8a5b"; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.restore();
+  };
+  sbox({ x: 0, y: baseH * 0.5 }, servo(1).mass, 0);
+  sbox(r.J2, servo(2).mass, T2);
+  sbox(r.J3, servo(3).mass, T3);
+  sbox(r.J4, servo(4).mass, T3);
+  sbox(r.J5, servo(5).mass, T5);
+  sbox(r.J6, servo(6).mass, T5);
+  // roll joint bands (J4 on forearm, J6 on wrist) + labels
+  for (const [p, th, w, n] of [[r.J4, T3, 22, "J4"], [r.J6, T5, 16, "J6"]]) {
+    ctx.save(); ctx.translate(X(p.x), Y(p.y)); ctx.rotate(th);
+    ctx.fillStyle = "#0e1217"; ctx.strokeStyle = "#8b96a5"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(-2.5 * s, -(w / 2 + 3) * s, 5 * s, (w + 6) * s, 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = "#8b96a5"; ctx.font = "600 11px system-ui"; ctx.fillText(n + " ⟲", X(p.x) - 10, Y(p.y) + (w / 2 + 16) * s + 2);
   }
 
-  // joints + torque labels
-  const jt = [[2, r.J2], [3, r.J3], [5, r.J5]];
-  ctx.font = "12px sans-serif";
-  for (const [j, p] of jt) {
-    const u = kgcm(r.torque[j]) / servo(j).rating;
-    ctx.strokeStyle = u < 0.5 ? "#3fb97a" : u < 0.8 ? "#e5a93a" : "#e5534b";
-    ctx.lineWidth = 3; ctx.fillStyle = "#0e1217";
-    ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 9, 0, 7); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#e6eaf0";
-    ctx.fillText(`J${j}: ${kgcm(r.torque[j]).toFixed(1)} kg·cm (${(u * 100).toFixed(0)}%)`, X(p.x) - 40, Y(p.y) - 16);
+  // --- payload block + weight arrow ---
+  if (P.payload > 0) {
+    const pw = Math.max(8, Math.cbrt(P.payload) * 2.6) * s;
+    ctx.save(); ctx.translate(X(r.TCP.x), Y(r.TCP.y)); ctx.rotate(T5);
+    ctx.beginPath(); ctx.roundRect(-pw * .1, -pw / 2, pw, pw, 3);
+    ctx.fillStyle = grad("#ff8fc4", "#c43b86", pw); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+    const len = Math.min(70, 22 + P.payload * 0.25);
+    arrow(X(r.TCP.x), Y(r.TCP.y) + pw / 2 + 2, X(r.TCP.x), Y(r.TCP.y) + pw / 2 + 2 + len, "#ff5ba8");
+    ctx.fillStyle = "#ff8fc4"; ctx.font = "600 11px system-ui";
+    ctx.fillText(P.payload + " g", X(r.TCP.x) + 8, Y(r.TCP.y) + pw / 2 + len * 0.7);
   }
-  for (const [n, p] of [["J4", r.J4], ["J6", r.J6]]) {
-    ctx.fillStyle = "#8b96a5"; ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 4, 0, 7); ctx.fill();
-    ctx.fillText(n, X(p.x) + 6, Y(p.y) + 14);
+  ctx.fillStyle = "#e6eaf0"; ctx.beginPath(); ctx.arc(X(r.TCP.x), Y(r.TCP.y), 3, 0, 7); ctx.fill();
+
+  // --- centre of mass markers of individual parts ---
+  for (const it of r.m) if (it.kind === "part") {
+    ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.beginPath(); ctx.arc(X(it.p.x), Y(it.p.y), 2.5, 0, 7); ctx.fill();
   }
 
-  // overall centre of mass
-  ctx.strokeStyle = "#ff5ba8"; ctx.lineWidth = 2;
+  // --- angle arcs ---
+  const arc = (p, ref, now, rad, col) => {
+    if (Math.abs(now - ref) < 1e-6) return;
+    const cx = X(p.x), cy = Y(p.y);
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(ref) * (rad + 18), cy + Math.sin(ref) * (rad + 18)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, rad, ref, now, now < ref); ctx.stroke();
+    const mid = (ref + now) / 2, d = Math.round(-(now - ref) * 180 / Math.PI);
+    ctx.fillStyle = col; ctx.font = "600 11px system-ui";
+    ctx.fillText(d + "°", cx + Math.cos(mid) * (rad + 14) - 8, cy + Math.sin(mid) * (rad + 14) + 4);
+  };
+  arc(r.J2, 0, T2, 34, "#6db6ff");
+  arc(r.J3, T2, T3, 34, "#52cf90");
+  arc(r.J5, T3, T5, 30, "#f0bf55");
+
+  // --- joint hubs with utilization gauge + torque labels ---
+  const lab = { 2: -62, 3: -104, 5: -62 };
+  for (const j of [2, 3, 5]) {
+    const p = r["J" + j], u = util(j), cx = X(p.x), cy = Y(p.y), col = ucol(u);
+    ctx.lineWidth = 4; ctx.strokeStyle = "#2a3340"; ctx.beginPath(); ctx.arc(cx, cy, 13, 0, 7); ctx.stroke();
+    ctx.strokeStyle = col; ctx.beginPath(); ctx.arc(cx, cy, 13, -Math.PI / 2, -Math.PI / 2 + Math.min(1, u) * 2 * Math.PI); ctx.stroke();
+    ctx.fillStyle = "#cfd6df"; ctx.beginPath(); ctx.arc(cx, cy, 8, 0, 7); ctx.fill();
+    ctx.fillStyle = "#0e1217"; ctx.beginPath(); ctx.arc(cx, cy, 3.5, 0, 7); ctx.fill();
+    const ly = Math.max(20, cy + lab[j]), dir = Math.sign(ly - cy);
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, cy + dir * 16); ctx.lineTo(cx, ly - dir * 12); ctx.stroke();
+    pill(`J${j}  ${kgcm(r.torque[j]).toFixed(1)} kg·cm · ${(u * 100).toFixed(0)}%`, cx, ly, col);
+  }
+
+  // --- reach dimension + overall COM with drop line ---
+  ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.setLineDash([6, 5]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(X(r.J2.x), Y(r.J2.y)); ctx.lineTo(X(r.TCP.x), Y(r.TCP.y)); ctx.stroke(); ctx.setLineDash([]);
+  const mid = lerp(r.J2, r.TCP, 0.5);
+  ctx.fillStyle = "#8b96a5"; ctx.font = "11px system-ui"; ctx.fillText(r.reach.toFixed(0) + " mm", X(mid.x) - 20, Y(mid.y) + 24);
+
   const cx = X(r.com.x), cy = Y(r.com.y);
-  ctx.beginPath(); ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8); ctx.stroke();
-  ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, oy); ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle = "#ff5ba8"; ctx.fillText("COM", cx + 10, cy - 6);
+  ctx.strokeStyle = "#ff5ba8"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, oy); ctx.stroke(); ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.stroke();
+  ctx.fillStyle = "#ff5ba8"; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, 7, 0, Math.PI / 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, 7, Math.PI, 1.5 * Math.PI); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx, oy); ctx.lineTo(cx - 5, oy + 9); ctx.lineTo(cx + 5, oy + 9); ctx.fill();
+  ctx.font = "600 11px system-ui"; ctx.fillText(`COM ${(r.total / 1000).toFixed(2)} kg · x ${r.com.x.toFixed(0)} mm`, cx + 10, oy + 22);
 
-  // legend
-  ctx.fillStyle = "#8b96a5"; ctx.font = "11px sans-serif";
-  ctx.fillText("● parts (white)  ● servos (orange)  ● payload (pink) — dot size ~ mass", 10, 16);
-  ctx.fillText(`TCP: x ${r.TCP.x.toFixed(0)} mm, z ${r.TCP.y.toFixed(0)} mm`, 10, 32);
+  // --- HUD ---
+  ctx.fillStyle = "#8b96a5"; ctx.font = "12px system-ui";
+  ctx.fillText(`TCP  x ${r.TCP.x.toFixed(0)} mm · z ${r.TCP.y.toFixed(0)} mm`, 12, 20);
+  const leg = [["#ff8a5b", "servo"], ["#ffffff", "part COM"], ["#ff5ba8", "payload / total COM"]];
+  let lx = 12;
+  for (const [c, t] of leg) { ctx.fillStyle = c; ctx.fillRect(lx, 30, 9, 9); ctx.fillStyle = "#8b96a5"; ctx.fillText(t, lx + 14, 39); lx += 24 + ctx.measureText(t).width; }
+  ctx.fillStyle = stable ? "#3fb97a" : "#e5534b";
+  ctx.fillText(stable ? "● stable (COM over base)" : "● TIPS OVER (COM outside base)", 12, 58);
 }
 
 // ---------- events ----------
@@ -341,6 +456,8 @@ el("upright").onclick = () => setAngles(90, 0, 0);
 el("reset").onclick = () => { P = JSON.parse(JSON.stringify(DEFAULTS)); buildTables(); render(); };
 window.addEventListener("resize", render);
 
+// optional pose from URL hash, e.g. #a2=30&a3=-60&a5=40
+for (const [k, v] of new URLSearchParams(location.hash.slice(1))) if (k in ang && !isNaN(+v)) { ang[k] = +v; el(k).value = +v; }
 buildTables();
 render();
 </script>
