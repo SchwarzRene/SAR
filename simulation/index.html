@@ -121,11 +121,11 @@ const G = 9.81;
 const DEFAULTS = {
   parts: [
     // key, label, length mm, mass g, COM fraction along length
-    { key: "base",  label: "Base",      len: 60,  mass: 400, com: 0.5 },
+    { key: "base",  label: "Base",      len: 190, mass: 400, com: 0.5 },
     { key: "upper", label: "Upper arm", len: 150, mass: 120, com: 0.5 },
-    { key: "fore",  label: "Forearm",   len: 130, mass: 100, com: 0.5 },
-    { key: "wrist", label: "Wrist",     len: 50,  mass: 40,  com: 0.5 },
-    { key: "tool",  label: "Tool",      len: 60,  mass: 30,  com: 0.5 },
+    { key: "fore",  label: "Forearm",   len: 150, mass: 100, com: 0.5 },
+    { key: "wrist", label: "Wrist",     len: 75,  mass: 40,  com: 0.5 },
+    { key: "tool",  label: "Tool",      len: 75,  mass: 30,  com: 0.5 },
   ],
   servos: [
     // joint, label, position fraction along forearm (only J4 used)
@@ -139,10 +139,10 @@ const DEFAULTS = {
   // per joint: stepper motor id, cycloidal ratio 1:n (design choice), drive mass g (estimate)
   drives: {
     1: { motor: "n23s",  ratio: 20, driveMass: 250 },
-    2: { motor: "n17l",  ratio: 30, driveMass: 250 },
-    3: { motor: "n17m",  ratio: 25, driveMass: 200 },
+    2: { motor: "n23s",  ratio: 30, driveMass: 250 },
+    3: { motor: "n23s",  ratio: 25, driveMass: 200 },
     4: { motor: "n14",   ratio: 15, driveMass: 100 },
-    5: { motor: "n14",   ratio: 15, driveMass: 100 },
+    5: { motor: "n17s",  ratio: 15, driveMass: 100 },
     6: { motor: "n11",   ratio: 10, driveMass: 60 },
   },
   eff: 0.8,      // cycloidal drive efficiency (assumption, measure your own)
