@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAR Load Simulator</title>
+<style>
+  :root {
+    --bg: #12161c; --panel: #1b212a; --line: #2c3440; --text: #e6eaf0; --dim: #8b96a5;
+    --accent: #4aa3ff; --ok: #3fb97a; --warn: #e5a93a; --bad: #e5534b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; }
+  header span { color: var(--dim); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 460px; gap: 12px; padding: 12px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  canvas { width: 100%; height: 520px; display: block; background: #0e1217; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 3px 4px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  input[type=number] { width: 68px; background: #0e1217; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; text-align: right; }
+  .sliders { display: grid; grid-template-columns: 90px 1fr 56px; gap: 6px 8px; align-items: center; margin-top: 10px; }
+  .sliders input[type=range] { width: 100%; }
+  .sliders output { text-align: right; color: var(--dim); }
+  button { background: var(--accent); color: #04121f; border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-weight: 600; }
+  button.sec { background: #2c3440; color: var(--text); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .stat { background: #0e1217; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat small { color: var(--dim); }
+  .bar { height: 8px; background: #0e1217; border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar i { display: block; height: 100%; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .right { display: flex; flex-direction: column; gap: 12px; }
+  .note { color: var(--dim); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SAR – Six Axis Robot Load Simulator</h1>
+  <span>Side view · gravity torque per joint · default pose = fully stretched, horizontal</span>
+</header>
+
+<main>
+  <div class="left" style="display:flex;flex-direction:column;gap:12px;min-width:0">
+    <div class="card">
+      <h2>Side view</h2>
+      <canvas id="view"></canvas>
+      <div class="sliders">
+        <label>J2 shoulder</label><input type="range" id="a2" min="-90" max="90" value="0"><output id="a2o"></output>
+        <label>J3 elbow</label><input type="range" id="a3" min="-135" max="135" value="0"><output id="a3o"></output>
+        <label>J5 wrist</label><input type="range" id="a5" min="-120" max="120" value="0"><output id="a5o"></output>
+      </div>
+      <div class="row">
+        <button id="stretch">Max stretch (all 0°)</button>
+        <button class="sec" id="upright">Upright</button>
+        <button class="sec" id="reset">Reset parameters</button>
+      </div>
+      <div class="note">0° = link continues straight horizontally. Positive angle = rotate upward. J1, J4, J6 are roll/yaw axes: they carry no gravity torque when the load lies on the axis.</div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="card">
+      <h2>Results</h2>
+      <div class="stats" id="stats"></div>
+      <table id="joints"></table>
+      <div class="note">Utilization = gravity torque ÷ servo rating. Keep it below ~50 % for continuous holding with margin for acceleration.</div>
+    </div>
+
+    <div class="card">
+      <h2>Parts (edit values)</h2>
+      <table id="parts"></table>
+    </div>
+
+    <div class="card">
+      <h2>Servos &amp; payload</h2>
+      <table id="servos"></table>
+      <div class="note">Servo mass is placed at its joint. The J4 servo sits at the given fraction along the forearm.</div>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const G = 9.81;
+
+// ---------- default parameters (mm, g, kg·cm) ----------
+const DEFAULTS = {
+  parts: [
+    // key, label, length mm, mass g, COM fraction along length
+    { key: "base",  label: "Base",      len: 60,  mass: 400, com: 0.5 },
+    { key: "upper", label: "Upper arm", len: 150, mass: 120, com: 0.5 },
+    { key: "fore",  label: "Forearm",   len: 130, mass: 100, com: 0.5 },
+    { key: "wrist", label: "Wrist",     len: 50,  mass: 40,  com: 0.5 },
+    { key: "tool",  label: "Tool",      len: 60,  mass: 30,  com: 0.5 },
+  ],
+  servos: [
+    // joint, label, mass g, rated torque kg·cm, position fraction (only J4 used)
+    { joint: 1, label: "J1 base yaw",    mass: 60, rating: 25, pos: 0 },
+    { joint: 2, label: "J2 shoulder",    mass: 60, rating: 25, pos: 0 },
+    { joint: 3, label: "J3 elbow",       mass: 60, rating: 25, pos: 0 },
+    { joint: 4, label: "J4 forearm roll",mass: 25, rating: 10, pos: 0.85 },
+    { joint: 5, label: "J5 wrist",       mass: 25, rating: 10, pos: 0 },
+    { joint: 6, label: "J6 tool roll",   mass: 13, rating: 3,  pos: 0 },
+  ],
+  payload: 100, // g, at TCP
+  baseRadius: 60, // mm, tipping radius
+};
+let P = JSON.parse(JSON.stringify(DEFAULTS));
+const ang = { a2: 0, a3: 0, a5: 0 };
+
+// ---------- kinematics + mass model ----------
+const deg = d => d * Math.PI / 180;
+const part = k => P.parts.find(p => p.key === k);
+const servo = j => P.servos.find(s => s.joint === j);
+
+function solve() {
+  const base = part("base"), up = part("upper"), fo = part("fore"), wr = part("wrist"), tl = part("tool");
+  const t2 = deg(ang.a2), t3 = t2 + deg(ang.a3), t5 = t3 + deg(ang.a5);
+  const J2 = { x: 0, y: base.len };
+  const J3 = { x: J2.x + up.len * Math.cos(t2), y: J2.y + up.len * Math.sin(t2) };
+  const J5 = { x: J3.x + fo.len * Math.cos(t3), y: J3.y + fo.len * Math.sin(t3) };
+  const J6 = { x: J5.x + wr.len * Math.cos(t5), y: J5.y + wr.len * Math.sin(t5) };
+  const TCP = { x: J6.x + tl.len * Math.cos(t5), y: J6.y + tl.len * Math.sin(t5) };
+  const along = (a, b, f) => ({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+  const J4 = along(J3, J5, servo(4).pos);
+
+  // masses (g) with positions; `from` = lowest joint that carries this mass
+  const m = [
+    { name: "Base",          mass: base.mass,      p: { x: 0, y: base.len * base.com }, from: 1, kind: "part" },
+    { name: "J1 servo",      mass: servo(1).mass,  p: { x: 0, y: base.len * 0.5 },      from: 1, kind: "servo" },
+    { name: "J2 servo",      mass: servo(2).mass,  p: J2,                               from: 2, kind: "servo" },
+    { name: "Upper arm",     mass: up.mass,        p: along(J2, J3, up.com),            from: 2, kind: "part" },
+    { name: "J3 servo",      mass: servo(3).mass,  p: J3,                               from: 3, kind: "servo" },
+    { name: "Forearm",       mass: fo.mass,        p: along(J3, J5, fo.com),            from: 3, kind: "part" },
+    { name: "J4 servo",      mass: servo(4).mass,  p: J4,                               from: 3, kind: "servo" },
+    { name: "J5 servo",      mass: servo(5).mass,  p: J5,                               from: 5, kind: "servo" },
+    { name: "Wrist",         mass: wr.mass,        p: along(J5, J6, wr.com),            from: 5, kind: "part" },
+    { name: "J6 servo",      mass: servo(6).mass,  p: J6,                               from: 5, kind: "servo" },
+    { name: "Tool",          mass: tl.mass,        p: along(J6, TCP, tl.com),           from: 5, kind: "part" },
+    { name: "Payload",       mass: P.payload,      p: TCP,                              from: 5, kind: "payload" },
+  ];
+  const joints = { 2: J2, 3: J3, 5: J5 };
+  // gravity torque (N·m) about J2, J3, J5 from every mass at/after that joint
+  const torque = {};
+  for (const j of [2, 3, 5]) {
+    let t = 0;
+    for (const it of m) if (it.from >= j) {
+      // a joint's own servo sits on the joint axis -> zero arm anyway
+      t += (it.mass / 1000) * G * ((it.p.x - joints[j].x) / 1000);
+    }
+    torque[j] = Math.abs(t);
+    torque["s" + j] = t;
+  }
+  const total = m.reduce((s, it) => s + it.mass, 0);
+  const com = m.reduce((s, it) => ({ x: s.x + it.mass * it.p.x, y: s.y + it.mass * it.p.y }), { x: 0, y: 0 });
+  com.x /= total; com.y /= total;
+  const armMass = m.filter(it => it.from >= 2).reduce((s, it) => s + it.mass, 0);
+  return { J2, J3, J4, J5, J6, TCP, m, torque, total, com, armMass, reach: Math.hypot(TCP.x, TCP.y - J2.y) };
+}
+
+// ---------- UI: tables ----------
+const el = id => document.getElementById(id);
+function numInput(val, onchange, step = 1) {
+  const i = document.createElement("input");
+  i.type = "number"; i.value = val; i.step = step; i.min = 0;
+  i.addEventListener("input", () => { const v = parseFloat(i.value); if (!isNaN(v)) { onchange(v); render(); } });
+  return i;
+}
+function buildTables() {
+  const pt = el("parts"); pt.innerHTML = "<tr><th>Part</th><th>Length mm</th><th>Mass g</th><th>COM 0–1</th></tr>";
+  for (const p of P.parts) {
+    const tr = pt.insertRow(); tr.insertCell().textContent = p.label;
+    tr.insertCell().appendChild(numInput(p.len, v => p.len = v));
+    tr.insertCell().appendChild(numInput(p.mass, v => p.mass = v));
+    tr.insertCell().appendChild(numInput(p.com, v => p.com = v, 0.05));
+  }
+  const st = el("servos"); st.innerHTML = "<tr><th>Servo</th><th>Mass g</th><th>Rating kg·cm</th><th>Pos 0–1</th></tr>";
+  for (const s of P.servos) {
+    const tr = st.insertRow(); tr.insertCell().textContent = s.label;
+    tr.insertCell().appendChild(numInput(s.mass, v => s.mass = v));
+    tr.insertCell().appendChild(numInput(s.rating, v => s.rating = v, 0.5));
+    const c = tr.insertCell();
+    if (s.joint === 4) c.appendChild(numInput(s.pos, v => s.pos = v, 0.05)); else c.textContent = "–";
+  }
+  let tr = st.insertRow(); tr.insertCell().textContent = "Payload at TCP";
+  tr.insertCell().appendChild(numInput(P.payload, v => P.payload = v, 10));
+  tr.insertCell().textContent = "g"; tr.insertCell();
+  tr = st.insertRow(); tr.insertCell().textContent = "Base radius (tipping)";
+  tr.insertCell().appendChild(numInput(P.baseRadius, v => P.baseRadius = v, 5));
+  tr.insertCell().textContent = "mm"; tr.insertCell();
+}
+
+const kgcm = nm => nm / G * 100; // N·m -> kg·cm
+function utilClass(u) { return u < 0.5 ? "ok" : u < 0.8 ? "warn" : "bad"; }
+function utilColor(u) { return u < 0.5 ? "var(--ok)" : u < 0.8 ? "var(--warn)" : "var(--bad)"; }
+
+function renderResults(r) {
+  // tipping: COM horizontal offset vs base radius
+  const tipMargin = P.baseRadius - r.com.x;
+  el("stats").innerHTML = `
+    <div class="stat"><b>${(r.total / 1000).toFixed(3)} kg</b><small>total weight (${(r.total * G / 1000).toFixed(2)} N)</small></div>
+    <div class="stat"><b>${(r.armMass / 1000).toFixed(3)} kg</b><small>moving arm incl. payload</small></div>
+    <div class="stat"><b>${r.reach.toFixed(0)} mm</b><small>reach from J2 to TCP</small></div>
+    <div class="stat"><b class="${tipMargin > 0 ? "ok" : "bad"}">${r.com.x.toFixed(0)} mm</b><small>COM offset (base radius ${P.baseRadius}) ${tipMargin > 0 ? "stable" : "TIPS OVER"}</small></div>`;
+
+  const jt = el("joints");
+  jt.innerHTML = "<tr><th>Joint</th><th>Torque N·m</th><th>kg·cm</th><th>Rating</th><th>Utilization</th></tr>";
+  for (const j of [2, 3, 5]) {
+    const tq = kgcm(r.torque[j]), rate = servo(j).rating, u = tq / rate;
+    const tr = jt.insertRow();
+    tr.insertCell().textContent = servo(j).label;
+    tr.insertCell().textContent = r.torque[j].toFixed(3);
+    tr.insertCell().textContent = tq.toFixed(1);
+    tr.insertCell().textContent = rate;
+    const c = tr.insertCell();
+    c.innerHTML = `<span class="${utilClass(u)}">${(u * 100).toFixed(0)} %</span><div class="bar"><i style="width:${Math.min(100, u * 100)}%;background:${utilColor(u)}"></i></div>`;
+  }
+  for (const j of [1, 4, 6]) {
+    const tr = jt.insertRow(); tr.insertCell().textContent = servo(j).label;
+    const c = tr.insertCell(); c.colSpan = 4; c.style.textAlign = "left"; c.style.color = "var(--dim)";
+    c.textContent = "roll/yaw axis – no gravity torque (inertia only)";
+  }
+
+  // per-part breakdown (appended)
+  const bt = document.createElement("table");
+  bt.innerHTML = "<tr><th>Mass</th><th>g</th><th>J2 N·m</th><th>J3 N·m</th><th>J5 N·m</th></tr>";
+  const J = { 2: r.J2, 3: r.J3, 5: r.J5 };
+  for (const it of r.m) {
+    const tr = bt.insertRow(); tr.insertCell().textContent = it.name;
+    tr.insertCell().textContent = it.mass;
+    for (const j of [2, 3, 5]) {
+      const c = tr.insertCell();
+      c.textContent = it.from >= j ? ((it.mass / 1000) * G * ((it.p.x - J[j].x) / 1000)).toFixed(3) : "";
+      if (it.from < j) c.style.color = "var(--dim)";
+    }
+  }
+  const old = el("breakdown"); if (old) old.remove();
+  bt.id = "breakdown"; bt.style.marginTop = "10px";
+  el("joints").after(bt);
+}
+
+// ---------- drawing ----------
+const cv = el("view"), ctx = cv.getContext("2d");
+function render() {
+  const r = solve();
+  for (const k of ["a2", "a3", "a5"]) el(k + "o").textContent = ang[k] + "°";
+  renderResults(r);
+  draw(r);
+}
+function draw(r) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // fit scale to the maximum possible reach so the view stays stable while moving sliders
+  const maxReach = part("upper").len + part("fore").len + part("wrist").len + part("tool").len;
+  const base = part("base").len;
+  const s = Math.min((W - 120) / (maxReach + P.baseRadius + 20), (H - 80) / (base + maxReach + 20));
+  const ox = 70 + P.baseRadius * s, oy = H - 40; // world (0,0) = base centre on ground
+  const X = x => ox + x * s, Y = y => oy - y * s;
+
+  // grid + ground
+  ctx.strokeStyle = "#1c232d"; ctx.lineWidth = 1; ctx.font = "10px sans-serif"; ctx.fillStyle = "#566171";
+  for (let mm = 0; mm <= maxReach + 50; mm += 50) {
+    ctx.beginPath(); ctx.moveTo(X(mm), 0); ctx.lineTo(X(mm), oy); ctx.stroke();
+    ctx.fillText(mm, X(mm) + 2, oy + 12);
+  }
+  ctx.strokeStyle = "#3a4452"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(W, oy); ctx.stroke();
+
+  // base footprint
+  ctx.fillStyle = "#2a3340"; ctx.fillRect(X(-P.baseRadius), oy - 6, 2 * P.baseRadius * s, 6);
+
+  const link = (a, b, w, col) => {
+    ctx.strokeStyle = col; ctx.lineWidth = w * s; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(X(a.x), Y(a.y)); ctx.lineTo(X(b.x), Y(b.y)); ctx.stroke();
+  };
+  link({ x: 0, y: 0 }, r.J2, 34, "#5b6778");
+  link(r.J2, r.J3, 24, "#4aa3ff");
+  link(r.J3, r.J5, 20, "#3fb97a");
+  link(r.J5, r.J6, 14, "#e5a93a");
+  link(r.J6, r.TCP, 8, "#b57bee");
+
+  // mass markers with gravity arrows (area ~ mass)
+  const colors = { part: "#ffffff", servo: "#ff8a5b", payload: "#ff5ba8" };
+  for (const it of r.m) {
+    const rad = Math.max(3, Math.sqrt(it.mass) * 0.45);
+    ctx.fillStyle = colors[it.kind]; ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.arc(X(it.p.x), Y(it.p.y), rad, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+  }
+
+  // joints + torque labels
+  const jt = [[2, r.J2], [3, r.J3], [5, r.J5]];
+  ctx.font = "12px sans-serif";
+  for (const [j, p] of jt) {
+    const u = kgcm(r.torque[j]) / servo(j).rating;
+    ctx.strokeStyle = u < 0.5 ? "#3fb97a" : u < 0.8 ? "#e5a93a" : "#e5534b";
+    ctx.lineWidth = 3; ctx.fillStyle = "#0e1217";
+    ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 9, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#e6eaf0";
+    ctx.fillText(`J${j}: ${kgcm(r.torque[j]).toFixed(1)} kg·cm (${(u * 100).toFixed(0)}%)`, X(p.x) - 40, Y(p.y) - 16);
+  }
+  for (const [n, p] of [["J4", r.J4], ["J6", r.J6]]) {
+    ctx.fillStyle = "#8b96a5"; ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 4, 0, 7); ctx.fill();
+    ctx.fillText(n, X(p.x) + 6, Y(p.y) + 14);
+  }
+
+  // overall centre of mass
+  ctx.strokeStyle = "#ff5ba8"; ctx.lineWidth = 2;
+  const cx = X(r.com.x), cy = Y(r.com.y);
+  ctx.beginPath(); ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8); ctx.stroke();
+  ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, oy); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = "#ff5ba8"; ctx.fillText("COM", cx + 10, cy - 6);
+
+  // legend
+  ctx.fillStyle = "#8b96a5"; ctx.font = "11px sans-serif";
+  ctx.fillText("● parts (white)  ● servos (orange)  ● payload (pink) — dot size ~ mass", 10, 16);
+  ctx.fillText(`TCP: x ${r.TCP.x.toFixed(0)} mm, z ${r.TCP.y.toFixed(0)} mm`, 10, 32);
+}
+
+// ---------- events ----------
+for (const k of ["a2", "a3", "a5"]) {
+  el(k).addEventListener("input", e => { ang[k] = +e.target.value; render(); });
+}
+function setAngles(a2, a3, a5) {
+  Object.assign(ang, { a2, a3, a5 });
+  el("a2").value = a2; el("a3").value = a3; el("a5").value = a5; render();
+}
+el("stretch").onclick = () => setAngles(0, 0, 0);
+el("upright").onclick = () => setAngles(90, 0, 0);
+el("reset").onclick = () => { P = JSON.parse(JSON.stringify(DEFAULTS)); buildTables(); render(); };
+window.addEventListener("resize", render);
+
+buildTables();
+render();
+</script>
+</body>
+</html>
